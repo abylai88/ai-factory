@@ -16,7 +16,7 @@ import {
   MissionEventSink,
 } from "../mission.js";
 import { MissionState } from "../state.js";
-import { Planner, createPlanner } from "../planner.js";
+import { Planner, createPlanner, createReadOnlyPlanner } from "../planner.js";
 import {
   MissionOrchestrator,
   DeterministicAuditor,
@@ -633,5 +633,316 @@ describe("invalid mission ID", () => {
 
     expect(state.getMission().id).not.toContain(" ");
     expect(state.getMission().id).not.toContain("&");
+  });
+});
+
+// ─── Auditor Evidence Evaluation ────────────────────────────────────
+
+describe("auditor evidence evaluation", () => {
+  const auditor = new DeterministicAuditor();
+
+  function makeDelegation(criteria: string[]) {
+    return createDelegation("m1", "obj1", "Test", "desc", "engineering", {
+      acceptanceCriteria: criteria,
+    });
+  }
+
+  function makeResult(output: string, overrides?: Partial<AgentResult>): AgentResult {
+    return {
+      delegationId: "del-1",
+      status: "passed",
+      output,
+      durationMs: 100,
+      ...overrides,
+    };
+  }
+
+  function freshMissionAndPlan() {
+    const m = makeMission();
+    const p = makePlan(m);
+    return { mission: m, plan: p };
+  }
+
+  it("passes 'Codebase analyzed' for substantial research report", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["Codebase analyzed"]);
+    const result = makeResult(`
+      Project Overview: Traffic Dodge is a Phaser 3 game built with TypeScript and Webpack.
+      
+      File Structure:
+      - src/scenes/BootScene.ts: Boot and preload scene
+      - src/scenes/GameScene.ts: Main gameplay scene
+      - src/scenes/MenuScene.ts: Menu and UI scene
+      - src/main.ts: Entry point
+      
+      Architecture: The game uses a scene-based architecture with Phaser 3.
+      BootScene handles asset loading, GameScene manages physics and gameplay,
+      MenuScene provides the main menu UI.
+      
+      Key Components:
+      - Player controlled car with keyboard input
+      - Obstacle spawning system
+      - Score tracking
+      - Collision detection using Arcade Physics
+    `);
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("PASS");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(true);
+  });
+
+  it("passes 'Architecture documented' for architecture report", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["Architecture documented"]);
+    const result = makeResult(`
+      The project follows a scene-based architecture using Phaser 3.
+      
+      Architecture layers:
+      1. Entry point (main.ts) initializes the Phaser game config
+      2. BootScene handles asset preloading
+      3. GameScene manages the core gameplay loop
+      4. MenuScene provides UI navigation
+      
+      State management uses Phaser's built-in scene data sharing.
+      Physics is handled by Arcade Physics for collision detection.
+      
+      The rendering pipeline uses Phaser's WebGL renderer with
+      sprite-based graphics and tilemap support.
+    `);
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("PASS");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(true);
+  });
+
+  it("passes 'Key components identified' for component list", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["Key components identified"]);
+    const result = makeResult(`
+      Key components identified in the codebase:
+      
+      1. BootScene (src/scenes/BootScene.ts) - Asset preloading
+      2. GameScene (src/scenes/GameScene.ts) - Main gameplay
+      3. MenuScene (src/scenes/MenuScene.ts) - Menu UI
+      4. Player module - Car movement and input handling
+      5. ObstacleManager - Obstacle spawning and recycling
+      6. ScoreManager - Score tracking and persistence
+      
+      Each component handles a specific concern and communicates
+      through Phaser events and scene data.
+    `);
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("PASS");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(true);
+  });
+
+  it("fails 'Codebase analyzed' for empty result", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["Codebase analyzed"]);
+    const result = makeResult("");
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("FAIL");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(false);
+  });
+
+  it("fails 'Codebase analyzed' for trivial result", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["Codebase analyzed"]);
+    const result = makeResult("Done. Everything looks fine.");
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("FAIL");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(false);
+  });
+
+  it("passes 'No files modified' with read-only metadata", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["No files modified"]);
+    const result = makeResult("Investigation complete. No changes made.", { readOnly: true });
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("PASS");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(true);
+    expect(audit.acceptanceCriteriaResults[0].evidence).toContain("read-only");
+  });
+
+  it("fails 'No files modified' with write metadata", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["No files modified"]);
+    const result = makeResult("I wrote the new file and committed the changes.", { readOnly: false });
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("FAIL");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(false);
+  });
+
+  it("fails 'Codebase analyzed' for unrelated prose without code evidence", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["Codebase analyzed"]);
+    const result = makeResult(`
+      The weather today is sunny with a high of 75 degrees.
+      I went to the store and bought some groceries.
+      The meeting is scheduled for 3pm tomorrow.
+      Please remember to bring your laptop.
+    `);
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("FAIL");
+    expect(audit.acceptanceCriteriaResults[0].passed).toBe(false);
+  });
+
+  it("passes all criteria for comprehensive research report", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation([
+      "Codebase analyzed",
+      "Architecture documented",
+      "Key components identified",
+      "No files modified",
+    ]);
+    const result = makeResult(`
+      PROJECT OVERVIEW:
+      Traffic Dodge is a casual arcade game built with Phaser 3, TypeScript, and Webpack.
+      
+      ARCHITECTURE:
+      The game uses a scene-based architecture with three main scenes:
+      - BootScene: Handles asset preloading and initialization
+      - GameScene: Core gameplay with physics and input
+      - MenuScene: Main menu and UI
+      
+      KEY COMPONENTS:
+      1. src/scenes/BootScene.ts - Asset loading
+      2. src/scenes/GameScene.ts - Gameplay logic
+      3. src/scenes/MenuScene.ts - Menu UI
+      4. src/main.ts - Entry point
+      
+      FINDINGS:
+      - Physics uses Arcade Physics for collision detection
+      - Input handled via keyboard cursors
+      - Score tracked locally
+      
+      RECOMMENDATIONS:
+      - Consider adding sound effects
+      - Add particle effects for collisions
+    `, { readOnly: true });
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("PASS");
+    expect(audit.acceptanceCriteriaResults.every((r) => r.passed)).toBe(true);
+  });
+
+  it("evaluates architecture documented with ANSI escape codes", async () => {
+    const { mission, plan } = freshMissionAndPlan();
+    const delegation = makeDelegation(["Architecture documented"]);
+    const result = makeResult(
+      "\x1b[0mThe project uses a scene-based architecture\x1b[0m\n" +
+      "\x1b[0msrc/scenes/BootScene.ts handles loading\x1b[0m\n" +
+      "\x1b[0msrc/scenes/GameScene.ts manages gameplay\x1b[0m"
+    );
+    const audit = await auditor.audit(delegation, result, mission, plan);
+    expect(audit.status).toBe("PASS");
+  });
+
+  it("repair delegation executes through adapter", async () => {
+    const mission = makeMission();
+    const readOnlyPlanner = createReadOnlyPlanner();
+    const plan = readOnlyPlanner.decompose(mission);
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    let callCount = 0;
+    const adapter: FactoryExecutionAdapter = {
+      async runDelegation(delegation) {
+        callCount++;
+        if (callCount <= 1) {
+          const output = "Nothing relevant here at all";
+          await state.completeDelegation(delegation.id, "passed", output);
+          return { delegationId: delegation.id, status: "passed", output, durationMs: 10 };
+        }
+        const output = "Architecture documented. Codebase analyzed: src/main.ts, src/scenes/GameScene.ts. Key components found: BootScene, GameScene, MenuScene. No files modified.";
+        await state.completeDelegation(delegation.id, "passed", output);
+        return { delegationId: delegation.id, status: "passed", output, durationMs: 10 };
+      },
+    };
+
+    const eventSink = new InMemoryEventSink();
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 3,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: adapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state,
+    });
+
+    const result = await orchestrator.executeMission(mission, plan);
+    expect(result.status).toBe("completed");
+    expect(callCount).toBeGreaterThan(1);
+
+    const events = eventSink.recent();
+    const eventTypes = events.map((e) => e.type);
+    expect(eventTypes).toContain(MissionEventTypes.MISSION_REPAIRING);
+  });
+
+  it("fresh audit after repair uses evidence-based evaluation", async () => {
+    const auditor = new DeterministicAuditor();
+    const delegation = createDelegation("m1", "obj1", "Test", "desc", "engineering", {
+      acceptanceCriteria: ["Codebase analyzed"],
+    });
+    const mission = makeMission();
+    const plan = makePlan(mission);
+
+    const failResult: AgentResult = {
+      delegationId: delegation.id,
+      status: "passed",
+      output: "Nothing relevant",
+      durationMs: 10,
+    };
+    const audit1 = await auditor.audit(delegation, failResult, mission, plan);
+    expect(audit1.status).toBe("FAIL");
+
+    const passResult: AgentResult = {
+      delegationId: delegation.id,
+      status: "passed",
+      output: "Codebase analyzed: src/main.ts, src/scenes/GameScene.ts. Architecture documented.",
+      durationMs: 10,
+    };
+    const audit2 = await auditor.audit(delegation, passResult, mission, plan);
+    expect(audit2.status).toBe("PASS");
+  });
+
+  it("max repair limit remains enforced", async () => {
+    const mission = makeMission();
+    const readOnlyPlanner = createReadOnlyPlanner();
+    const plan = readOnlyPlanner.decompose(mission);
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    const adapter: FactoryExecutionAdapter = {
+      async runDelegation(delegation) {
+        await state.completeDelegation(delegation.id, "passed", "Nothing relevant", "");
+        return { delegationId: delegation.id, status: "passed", output: "Nothing relevant", durationMs: 10 };
+      },
+    };
+
+    const eventSink = new InMemoryEventSink();
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 2,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: adapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state,
+    });
+
+    const result = await orchestrator.executeMission(mission, plan);
+    expect(result.status).toBe("failed");
+
+    const repairEvents = eventSink.recent().filter((e) => e.type === MissionEventTypes.MISSION_REPAIRING);
+    expect(repairEvents.length).toBeLessThanOrEqual(2);
   });
 });

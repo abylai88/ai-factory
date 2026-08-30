@@ -118,6 +118,7 @@ export const AgentResultSchema = z.object({
   output: z.string(),
   error: z.string().optional(),
   durationMs: z.number().nonnegative(),
+  readOnly: z.boolean().optional(),
 });
 export type AgentResult = z.infer<typeof AgentResultSchema>;
 

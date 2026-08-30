@@ -317,3 +317,77 @@ export class Planner {
 export function createPlanner(config?: Partial<PlannerConfig>): Planner {
   return new Planner(config);
 }
+
+export interface ReadOnlyPlannerConfig {
+  maxDelegations: number;
+}
+
+const DEFAULT_READ_ONLY_CONFIG: ReadOnlyPlannerConfig = {
+  maxDelegations: 1,
+};
+
+export class ReadOnlyPlanner {
+  private readonly config: ReadOnlyPlannerConfig;
+
+  constructor(config?: Partial<ReadOnlyPlannerConfig>) {
+    this.config = { ...DEFAULT_READ_ONLY_CONFIG, ...config };
+  }
+
+  decompose(mission: Mission): ExecutionPlan {
+    const objectives: Objective[] = [];
+    const delegations: Delegation[] = [];
+    const risks: Risk[] = [];
+    const validationGates: ValidationGate[] = [];
+
+    const objective: Objective = {
+      id: "obj-1",
+      title: "Read-Only Investigation",
+      description: "Investigate and analyze the project without modifying files",
+      delegations: ["del-1"],
+    };
+    objectives.push(objective);
+
+    const delegation: Delegation = createDelegation(
+      mission.id,
+      objective.id,
+      "[1] Project Investigation",
+      mission.goal,
+      "engineering",
+      {
+        stepIds: ["research"],
+        dependsOn: [],
+        parallelizable: false,
+        acceptanceCriteria: [
+          "Codebase analyzed",
+          "Architecture documented",
+          "Key components identified",
+          "No files modified",
+        ],
+      }
+    );
+    delegations.push(delegation);
+
+    risks.push({
+      id: "risk-1",
+      description: "Agent may attempt to modify files despite read-only instructions",
+      severity: "low",
+      mitigation: "Agent permissions enforce read-only access",
+    });
+
+    validationGates.push({
+      id: `gate-${delegation.id}`,
+      delegationId: delegation.id,
+      criteria: delegation.acceptanceCriteria,
+    });
+
+    if (delegations.length > this.config.maxDelegations) {
+      delegations.length = this.config.maxDelegations;
+    }
+
+    return createExecutionPlan(mission, objectives, delegations, risks, validationGates);
+  }
+}
+
+export function createReadOnlyPlanner(config?: Partial<ReadOnlyPlannerConfig>): ReadOnlyPlanner {
+  return new ReadOnlyPlanner(config);
+}

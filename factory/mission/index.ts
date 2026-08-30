@@ -11,8 +11,8 @@ import {
   MissionConstraints,
 } from "./mission.js";
 import { MissionState } from "./state.js";
-import { Planner, createPlanner } from "./planner.js";
-import { MissionOrchestrator, RealFactoryAdapter, DeterministicAuditor } from "./orchestrator.js";
+import { Planner, createPlanner, ReadOnlyPlanner, createReadOnlyPlanner } from "./planner.js";
+import { MissionOrchestrator, RealFactoryAdapter, ReadOnlyFactoryAdapter, DeterministicAuditor } from "./orchestrator.js";
 import { InMemoryEventSink, NoopEventSink, MissionEventPublisher, createMissionEventPublisher, MissionEventTypes } from "./events.js";
 import { resolveWorkspaceDir } from "../setup/project-setup.js";
 import { classifyGoal, detectEngine } from "../engine/engine.js";
@@ -29,6 +29,7 @@ function parseArgs(argv: string[]): {
   projectId?: string;
   template?: string;
   dryRun: boolean;
+  readOnly: boolean;
   maxRepairs: number;
   engine?: string;
   force: boolean;
@@ -43,6 +44,7 @@ function parseArgs(argv: string[]): {
   let projectId: string | undefined;
   let template: string | undefined;
   let dryRun = false;
+  let readOnly = false;
   let maxRepairs = 3;
   let engine: string | undefined;
   let force = false;
@@ -61,6 +63,8 @@ function parseArgs(argv: string[]): {
       listTemplates = true;
     } else if (a === "--dry-run") {
       dryRun = true;
+    } else if (a === "--read-only") {
+      readOnly = true;
     } else if (a === "--max-repairs") {
       const n = Number(args[++i]);
       maxRepairs = Number.isFinite(n) && n > 0 ? n : 3;
@@ -83,6 +87,7 @@ function parseArgs(argv: string[]): {
     projectId,
     template,
     dryRun,
+    readOnly,
     maxRepairs,
     engine,
     force,
@@ -108,6 +113,7 @@ Options:
   --engine <name>       Engine: web | unity (default: auto-classified)
   --max-repairs <N>     Max repair iterations per delegation (default: 3)
   --dry-run             Show mission plan, do NOT execute
+  --read-only           Execute read-only investigation (no file modifications)
   --force               Replace existing workspace (DESTROYS content)
   --from-step <id>      Resume pipeline from this step ID
 
@@ -115,6 +121,7 @@ Examples:
   npm run mission -- run "Build a platformer game"
   npm run mission -- run "Fix TypeScript errors" --dry-run
   npm run mission -- run "Add new level" --project-id traffic-dodge
+  npm run mission -- run "Inspect project architecture" --read-only --project-id traffic-dodge
   npm run mission -- list-templates
 `);
 }
@@ -177,7 +184,7 @@ async function setupWorkspace(
 }
 
 async function main(): Promise<void> {
-  const { command, goal, project, projectId, template, dryRun, maxRepairs, engine, force, fromStep, listTemplates } = parseArgs(process.argv.slice(2));
+  const { command, goal, project, projectId, template, dryRun, readOnly, maxRepairs, engine, force, fromStep, listTemplates } = parseArgs(process.argv.slice(2));
 
   if (command === "list-templates" || listTemplates) {
     const baseDir = path.resolve(process.env.AI_FACTORY_HOME ?? process.cwd());
@@ -210,7 +217,7 @@ async function main(): Promise<void> {
 ╚══════════════════════════════════════╝
 `);
   console.log("🎯 GOAL:", goal);
-  console.log(dryRun ? "🧪 MODE: DRY-RUN" : "🧠 MODE: LIVE");
+  console.log(dryRun ? "🧪 MODE: DRY-RUN" : readOnly ? "👁️  MODE: READ-ONLY" : "🧠 MODE: LIVE");
   console.log(`🔧 MAX REPAIRS: ${maxRepairs}`);
 
   const provisioner = new ProjectProvisioner({
@@ -244,8 +251,15 @@ async function main(): Promise<void> {
   };
 
   const mission = createMission(goal, context, constraints);
-  const planner = createPlanner({ maxDelegations: constraints.maxDelegations, allowedPipelines: constraints.allowedPipelines });
-  const plan = planner.decompose(mission);
+
+  let plan: ExecutionPlan;
+  if (readOnly) {
+    const readOnlyPlanner = createReadOnlyPlanner({ maxDelegations: 1 });
+    plan = readOnlyPlanner.decompose(mission);
+  } else {
+    const planner = createPlanner({ maxDelegations: constraints.maxDelegations, allowedPipelines: constraints.allowedPipelines });
+    plan = planner.decompose(mission);
+  }
 
   console.log("\n📋 EXECUTION PLAN:");
   console.log("══════════════════");
@@ -289,7 +303,12 @@ async function main(): Promise<void> {
   }
 
   const eventSink = new InMemoryEventSink();
-  const innerAdapter = new RealFactoryAdapter();
+  let innerAdapter;
+  if (readOnly) {
+    innerAdapter = new ReadOnlyFactoryAdapter();
+  } else {
+    innerAdapter = new RealFactoryAdapter();
+  }
   const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager }, innerAdapter);
   const auditor = new DeterministicAuditor();
 
