@@ -101,6 +101,18 @@ export async function runTrafficDodgeSmoke(options: {
     }
 
     page = await context.newPage();
+
+    // Traffic Dodge normally runs inside the Yandex Games host iframe.
+    // Visual QA runs the game standalone, so the real Yandex SDK must not execute.
+    // Fulfill the SDK request with a deterministic local mock instead of aborting it.
+    await page.route("https://yandex.ru/games/sdk/v2", async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/javascript",
+        body: `${YA_GAMES_MOCK};`
+      });
+    });
+
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     const failedRequests: string[] = [];

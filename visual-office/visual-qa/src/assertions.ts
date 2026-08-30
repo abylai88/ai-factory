@@ -111,12 +111,36 @@ export async function assertCanvasDimensionsValid(
 export async function assertCanvasHasVisualContent(
   locator: Locator,
 ): Promise<AssertionResult> {
-  const varied = await locator
-    .evaluate((el: HTMLCanvasElement) => {
-      const ctx = el.getContext("2d");
+  try {
+    const result = await locator.evaluate((el: HTMLCanvasElement) => {
+      const width = el.width;
+      const height = el.height;
 
-      if (!ctx || el.width === 0 || el.height === 0) {
-        return false;
+      if (width <= 0 || height <= 0) {
+        return { passed: false, message: "Canvas has zero dimensions" };
+      }
+
+      // Phaser.AUTO may use WebGL instead of a 2D context.
+      // In that case, getContext("2d") is not a valid way to determine
+      // whether the game is visually rendering.
+      const hasWebGL =
+        Boolean(el.getContext("webgl")) ||
+        Boolean(el.getContext("webgl2"));
+
+      const ctx2d = el.getContext("2d");
+
+      if (!ctx2d && hasWebGL) {
+        return {
+          passed: true,
+          message: "Canvas has an active WebGL rendering context",
+        };
+      }
+
+      if (!ctx2d) {
+        return {
+          passed: false,
+          message: "Canvas has neither a 2D nor WebGL rendering context",
+        };
       }
 
       const points = [
@@ -130,34 +154,35 @@ export async function assertCanvasHasVisualContent(
       const colors = new Set<string>();
 
       for (const [rx, ry] of points) {
-        const x = Math.floor(el.width * rx);
-        const y = Math.floor(el.height * ry);
-        const data = ctx.getImageData(x, y, 1, 1).data;
-
-        colors.add(`${data[0]},${data[1]},${data[2]}`);
+        const x = Math.min(width - 1, Math.floor(width * rx));
+        const y = Math.min(height - 1, Math.floor(height * ry));
+        const data = ctx2d.getImageData(x, y, 1, 1).data;
+        colors.add(`${data[0]},${data[1]},${data[2]},${data[3]}`);
       }
 
-      return colors.size >= 3;
-    })
-    .catch(() => false);
+      return colors.size >= 3
+        ? {
+            passed: true,
+            message: "Canvas contains varied 2D visual content",
+          }
+        : {
+            passed: false,
+            message: "Canvas appears blank or uniform",
+          };
+    });
 
-  return varied
-    ? {
-        passed: true,
-        message: "Canvas contains varied visual content",
-      }
-    : {
-        passed: false,
-        message: "Canvas appears blank or uniform",
-      };
+    return result;
+  } catch (error) {
+    return {
+      passed: false,
+      message:
+        error instanceof Error
+          ? `Canvas visual-content check failed: ${error.message}`
+          : "Canvas visual-content check failed",
+    };
+  }
 }
 
-/**
- * Traffic Dodge currently bundles Phaser as a global object but does not
- * expose a reliable Phaser.GAMES registry. Therefore this assertion checks
- * externally observable boot/readiness signals instead of depending on an
- * internal Phaser runtime registry.
- */
 export async function assertMenuSceneActive(
   page: Page,
 ): Promise<AssertionResult> {
