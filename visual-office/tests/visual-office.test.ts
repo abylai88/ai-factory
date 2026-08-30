@@ -1,0 +1,25 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { FactoryAdapter } from "../backend/src/factory-adapter.js";
+import { createApp } from "../backend/src/app.js";
+import { normalizePipeline, normalizeTasks } from "../backend/src/events.js";
+
+const fixture = (name: string) => readFile(path.join(import.meta.dirname, "fixtures", name), "utf8");
+const roots: string[] = [];
+async function factory() { const root = await mkdtemp(path.join(tmpdir(), "visual-office-")); roots.push(root); await mkdir(path.join(root,"outputs","pipelines"),{recursive:true}); await mkdir(path.join(root,"tasks","project-fixture-game"),{recursive:true}); await mkdir(path.join(root,"agents","opencode"),{recursive:true}); await writeFile(path.join(root,"outputs","pipelines","game-fixture1.json"),await fixture("pipeline.json")); await writeFile(path.join(root,"tasks","project-fixture-game","tasks.json"),await fixture("tasks.json")); await writeFile(path.join(root,"agents","opencode","tester.md"),await fixture("tester.md")); return root; }
+afterEach(async()=>{ await Promise.all(roots.splice(0).map(root=>rm(root,{recursive:true,force:true}))); });
+
+describe("FactoryAdapter",()=>{
+  it("parses a current pipeline snapshot and safely strips unknown fields",async()=>{const root=await factory();const a=new FactoryAdapter({factoryRoot:root});const [p]=await a.listPipelines();expect(p.id).toBe("game-fixture1");expect(p.status).toBe("running");expect(p.entries[0].output).toBe("Safe agent report");expect((p as Record<string,unknown>).futureFactoryField).toBeUndefined();});
+  it("parses current task JSON and attempt history",async()=>{const root=await factory();const tasks=await new FactoryAdapter({factoryRoot:root}).getTasks("fixture-game");expect(tasks?.[0].model).toBe("opencode/mimo-v2.5-free");expect(tasks?.[0].attemptHistory?.[0].attempt).toBe(1);});
+  it("handles malformed JSON without throwing",async()=>{const root=await factory();await writeFile(path.join(root,"outputs","pipelines","bad.json"),"{");const a=new FactoryAdapter({factoryRoot:root});await expect(a.listPipelines()).resolves.toHaveLength(1);expect(a.consumeDiagnostics().some(d=>d.source.endsWith("bad.json"))).toBe(true);});
+  it("parses agent metadata and discovers projects",async()=>{const root=await factory();const a=new FactoryAdapter({factoryRoot:root});expect((await a.getAgent("tester"))?.canEdit).toBe(false);expect((await a.listProjects())[0].id).toBe("fixture-game");});
+});
+describe("API and events",()=>{
+  it("serves health, pipelines and agents",async()=>{const root=await factory();const app=createApp({factoryRoot:root,startMonitor:false});const health=await app.inject("/api/health");const pipelines=await app.inject("/api/pipelines");const agents=await app.inject("/api/agents");expect(health.statusCode).toBe(200);expect(JSON.parse(pipelines.body).pipelines[0].id).toBe("game-fixture1");expect(JSON.parse(agents.body).agents[0].name).toBe("tester");await app.close();});
+  it("has an SSE connection endpoint",async()=>{const root=await factory();const app=createApp({factoryRoot:root,startMonitor:false});await app.listen({host:"127.0.0.1",port:0});const address=app.server.address();const port=typeof address==="object"&&address?address.port:0;const controller=new AbortController();const response=await fetch(`http://127.0.0.1:${port}/api/events`,{signal:controller.signal});expect(response.headers.get("content-type")).toContain("text/event-stream");controller.abort();await app.close();});
+  it("normalizes real snapshot deltas",async()=>{const root=await factory();const [next]=await new FactoryAdapter({factoryRoot:root}).listPipelines();expect(normalizePipeline(undefined,next).some(e=>e.type==="pipeline.started")).toBe(true);const tasks=await new FactoryAdapter({factoryRoot:root}).getTasks("fixture-game")??[];expect(normalizeTasks("fixture-game",[],tasks).some(e=>e.type==="task.created")).toBe(true);});
+  it("does not expose arbitrary filesystem or shell endpoints",async()=>{const root=await factory();const app=createApp({factoryRoot:root,startMonitor:false});expect((await app.inject("/api/files?path=/etc/passwd")).statusCode).toBe(404);expect((await app.inject({method:"POST",url:"/api/shell"})).statusCode).toBe(404);await app.close();});
+});

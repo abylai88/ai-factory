@@ -1,0 +1,15 @@
+{
+  "state": {
+    "pipelineId": "game-fixture1",
+    "goal": "Create a fixture game",
+    "project": "/factory/projects/fixture-game",
+    "status": "running",
+    "currentStepId": "implementation",
+    "startedAt": "2026-08-30T10:00:00.000Z",
+    "bugfixIterations": 0,
+    "maxFixIterations": 5,
+    "errors": []
+  },
+  "entries": [{"stepId":"market","title":"Market analysis","role":"research","status":"passed","output":"Safe agent report","timestamp":"2026-08-30T10:01:00.000Z"}],
+  "futureFactoryField": "ignored"
+}
