@@ -45,8 +45,8 @@ export const ProjectSnapshotSchema = z.object({
 });
 export type ProjectSnapshot = z.infer<typeof ProjectSnapshotSchema>;
 export const FactoryEventSchema = z.object({
-  id: z.string(), occurredAt: z.string(), type: z.enum(["pipeline.started", "pipeline.step.started", "pipeline.step.completed", "pipeline.status.changed", "task.created", "task.status.changed", "task.attempt.started", "task.attempt.completed", "agent.output", "factory.log", "visual_qa.started", "visual_qa.check.completed", "visual_qa.artifact.created", "visual_qa.completed", "diagnostic"]),
-  severity: z.enum(["info", "warning", "error"]), pipelineId: z.string().optional(), projectId: z.string().optional(), taskId: z.string().optional(), payload: z.record(z.string(), z.unknown())
+  id: z.string(), occurredAt: z.string(), type: z.enum(["pipeline.started", "pipeline.step.started", "pipeline.step.completed", "pipeline.status.changed", "task.created", "task.status.changed", "task.attempt.started", "task.attempt.completed", "agent.output", "factory.log", "visual_qa.started", "visual_qa.check.completed", "visual_qa.artifact.created", "visual_qa.completed", "diagnostic", "mission.created", "mission.planned", "mission.approved", "mission.started", "delegation.created", "delegation.started", "delegation.completed", "mission.auditing", "mission.audit.passed", "mission.audit.failed", "mission.repairing", "mission.completed", "mission.failed"]),
+  severity: z.enum(["info", "warning", "error"]), pipelineId: z.string().optional(), projectId: z.string().optional(), taskId: z.string().optional(), missionId: z.string().optional(), payload: z.record(z.string(), z.unknown())
 });
 export type FactoryEvent = z.infer<typeof FactoryEventSchema>;
 export const ArtifactSchema = z.object({ id: z.string(), type: z.enum(["screenshot", "trace", "report"]), createdAt: z.string(), label: z.string(), available: z.boolean() });
@@ -117,3 +117,131 @@ export const HermesStatusSchema = z.object({
   summary: z.string()
 });
 export type HermesStatus = z.infer<typeof HermesStatusSchema>;
+
+export const MissionStatusSchema = z.enum([
+  "draft", "planned", "approved", "running", "auditing", "repairing",
+  "completed", "failed", "blocked", "cancelled"
+]);
+export type MissionStatus = z.infer<typeof MissionStatusSchema>;
+
+export const MissionListItemSchema = z.object({
+  id: z.string(),
+  goal: z.string(),
+  status: MissionStatusSchema,
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  planId: z.string().optional(),
+  currentDelegationIndex: z.number().int().nonnegative(),
+  delegationCount: z.number().int().nonnegative(),
+  repairCount: z.number().int().nonnegative(),
+});
+export type MissionListItem = z.infer<typeof MissionListItemSchema>;
+
+export const DelegationStatusSchema = z.enum(["queued", "running", "passed", "failed", "skipped", "blocked"]);
+export type DelegationStatus = z.infer<typeof DelegationStatusSchema>;
+
+export const DelegationSchema = z.object({
+  id: z.string(),
+  missionId: z.string(),
+  objectiveId: z.string(),
+  title: z.string(),
+  description: z.string(),
+  pipelineType: z.enum(["game", "engineering"]),
+  stepIds: z.array(z.string()).optional(),
+  dependsOn: z.array(z.string()),
+  parallelizable: z.boolean(),
+  acceptanceCriteria: z.array(z.string()),
+  status: DelegationStatusSchema,
+  createdAt: z.string(),
+  startedAt: z.string().optional(),
+  finishedAt: z.string().optional(),
+  pipelineId: z.string().optional(),
+  result: z.string().optional(),
+  error: z.string().optional(),
+});
+export type DelegationDTO = z.infer<typeof DelegationSchema>;
+
+export const AuditResultSchema = z.object({
+  delegationId: z.string(),
+  status: z.enum(["PASS", "FAIL"]),
+  summary: z.string(),
+  findings: z.array(z.string()),
+  acceptanceCriteriaResults: z.array(z.object({
+    criterion: z.string(),
+    passed: z.boolean(),
+    evidence: z.string().optional(),
+  })),
+  recommendedRepair: z.object({
+    description: z.string(),
+    focusAreas: z.array(z.string()),
+  }).optional(),
+});
+export type AuditResultDTO = z.infer<typeof AuditResultSchema>;
+
+export const RepairPlanSchema = z.object({
+  delegationId: z.string(),
+  description: z.string(),
+  focusAreas: z.array(z.string()),
+  maxIterations: z.number().int().positive(),
+  iteration: z.number().int().nonnegative(),
+});
+export type RepairPlanDTO = z.infer<typeof RepairPlanSchema>;
+
+export const ExecutionPlanSchema = z.object({
+  id: z.string(),
+  missionId: z.string(),
+  objectives: z.array(z.object({
+    id: z.string(),
+    title: z.string(),
+    description: z.string(),
+    delegations: z.array(z.string()),
+  })),
+  delegations: z.array(DelegationSchema),
+  risks: z.array(z.object({
+    id: z.string(),
+    description: z.string(),
+    severity: z.enum(["low", "medium", "high"]),
+    mitigation: z.string().optional(),
+  })),
+  validationGates: z.array(z.object({
+    id: z.string(),
+    delegationId: z.string(),
+    criteria: z.array(z.string()),
+  })),
+  createdAt: z.string(),
+});
+export type ExecutionPlanDTO = z.infer<typeof ExecutionPlanSchema>;
+
+export const MissionEventSchema = z.object({
+  id: z.string(),
+  occurredAt: z.string(),
+  missionId: z.string(),
+  type: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+});
+export type MissionEventDTO = z.infer<typeof MissionEventSchema>;
+
+export const MissionDetailSchema = z.object({
+  mission: z.object({
+    id: z.string(),
+    goal: z.string(),
+    context: z.object({ projectId: z.string().optional() }).optional(),
+    status: MissionStatusSchema,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    planId: z.string().optional(),
+    currentDelegationIndex: z.number().int().nonnegative(),
+  }),
+  plan: ExecutionPlanSchema.nullable(),
+  delegations: z.array(DelegationSchema),
+  auditResults: z.record(z.string(), AuditResultSchema),
+  repairPlans: z.record(z.string(), RepairPlanSchema),
+  recentEvents: z.array(MissionEventSchema),
+});
+export type MissionDetail = z.infer<typeof MissionDetailSchema>;
+
+export const MissionCreateRequestSchema = z.object({
+  goal: z.string().min(1, "Goal is required").max(1000, "Goal must be 1000 characters or fewer"),
+  projectId: z.string().optional(),
+}).strict();
+export type MissionCreateRequest = z.infer<typeof MissionCreateRequestSchema>;

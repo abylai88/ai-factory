@@ -34,6 +34,11 @@ export function useEvents() {
         const runId = typeof event.payload.runId === "string" ? event.payload.runId : undefined;
         if (runId) void queryClient.invalidateQueries({ queryKey: ["visual-qa-run", runId] });
       }
+      if (event.type.startsWith("mission.") || event.type.startsWith("delegation.")) {
+        void queryClient.invalidateQueries({ queryKey: ["missions"] });
+        const missionId = typeof event.payload.missionId === "string" ? event.payload.missionId : undefined;
+        if (missionId) void queryClient.invalidateQueries({ queryKey: ["mission", missionId] });
+      }
     };
 
     const connect = () => {

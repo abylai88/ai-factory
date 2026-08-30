@@ -4,6 +4,7 @@ import { useOffice } from "./store.js";
 
 const NAV = [
   ["/dashboard", "Control room"],
+  ["/missions", "Missions"],
   ["/projects", "Projects"],
   ["/pipelines", "Pipelines"],
   ["/agents", "Agents"],

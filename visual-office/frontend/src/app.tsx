@@ -4,6 +4,8 @@ import {
   Dashboard,
   DiagnosticsPage,
   EventsPage,
+  MissionDetailPage,
+  MissionsPage,
   PipelinePage,
   PipelinesPage,
   ProjectPage,
@@ -17,6 +19,8 @@ export function App() {
     <Routes>
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={<Dashboard />} />
+      <Route path="/missions" element={<MissionsPage />} />
+      <Route path="/missions/:id" element={<MissionDetailPage />} />
       <Route path="/projects" element={<ProjectsPage />} />
       <Route path="/projects/:id" element={<ProjectPage />} />
       <Route path="/projects/:id/tasks/:taskId" element={<TaskPage />} />

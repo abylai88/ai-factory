@@ -8,7 +8,8 @@ import { EventBus } from "./events.js";
 import { FactoryMonitor } from "./monitor.js";
 import { NullInfrastructureAgent } from "./infrastructure-agent.js";
 import { PlaywrightVisualQAService } from "../../visual-qa/src/service.js";
-import { VisualQaRunRequestSchema } from "../../shared/src/index.js";
+import { VisualQaRunRequestSchema, MissionCreateRequestSchema } from "../../shared/src/index.js";
+import { MissionService } from "./mission-adapter.js";
 
 export interface AppOptions { factoryRoot?: string; startMonitor?: boolean; serveStatic?: boolean; visualQa?: PlaywrightVisualQAService; }
 
@@ -26,6 +27,7 @@ export function createApp(options: AppOptions = {}) {
     factoryRoot,
     publish: event => events.publish(event)
   });
+  const missionService = new MissionService({ factoryRoot, eventBus: events });
 
   app.register(cors, { origin: [/^http:\/\/127\.0\.0\.1(?::\d+)?$/, /^http:\/\/localhost(?::\d+)?$/] });
 
@@ -112,6 +114,35 @@ export function createApp(options: AppOptions = {}) {
   app.get("/api/hermes/status", async () => {
     const assessment = await hermes.analyze();
     return { hermes: { available: assessment.available, summary: assessment.summary } };
+  });
+
+  app.get("/api/missions", async () => ({ missions: await missionService.listMissions() }));
+
+  app.get<{ Params: { id: string } }>("/api/missions/:id", async (request, reply) => {
+    if (!/^[A-Za-z0-9_-]+$/.test(request.params.id)) return reply.code(400).send({ error: "Invalid mission id" });
+    const detail = await missionService.getMission(request.params.id);
+    return detail ? { mission: detail } : reply.code(404).send({ error: "Mission not found" });
+  });
+
+  app.post("/api/missions", async (request, reply) => {
+    const parsed = MissionCreateRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid mission request", details: parsed.error.flatten() });
+    try {
+      const mission = await missionService.createMission(parsed.data.goal, parsed.data.projectId);
+      return reply.code(201).send({ mission });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to create mission" });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/missions/:id/start", async (request, reply) => {
+    if (!/^[A-Za-z0-9_-]+$/.test(request.params.id)) return reply.code(400).send({ error: "Invalid mission id" });
+    try {
+      const detail = await missionService.startMission(request.params.id);
+      return { mission: detail };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to start mission" });
+    }
   });
 
   app.get("/api/events", (request, reply) => {

@@ -6,6 +6,8 @@ import type {
   DiagnosticRecord,
   FactoryEvent,
   HermesStatus,
+  MissionListItem,
+  MissionDetail,
   PipelineSnapshot,
   ProjectSnapshot,
   TaskSnapshot,
@@ -609,8 +611,260 @@ function VisualQaPage() {
   );
 }
 
+function MissionsPage() {
+  const q = useQuery({ queryKey: ["missions"], queryFn: () => get<{ missions: MissionListItem[] }>("/api/missions") });
+  const [goal, setGoal] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const createMission = async () => {
+    setCreateError(null);
+    setCreating(true);
+    try {
+      const body: { goal: string; projectId?: string } = { goal: goal.trim() };
+      if (projectId.trim()) body.projectId = projectId.trim();
+      const { mission } = await post<{ mission: { id: string } }>("/api/missions", body);
+      setGoal("");
+      setProjectId("");
+      void q.refetch();
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : "Failed to create mission");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <Shell>
+      <PageHeader eyebrow="Mission control" title="Missions" />
+      <section className="stats">
+        <Stat label="Total missions" value={q.data?.missions.length ?? "—"} />
+        <Stat label="Running" value={q.data?.missions.filter(m => m.status === "running").length ?? 0} />
+        <Stat label="Completed" value={q.data?.missions.filter(m => m.status === "completed").length ?? 0} />
+        <Stat label="Failed" value={q.data?.missions.filter(m => m.status === "failed").length ?? 0} />
+      </section>
+
+      <Panel title="Create mission">
+        <div className="qa-controls">
+          <label>
+            Goal
+            <input
+              type="text"
+              value={goal}
+              onChange={e => setGoal(e.target.value)}
+              placeholder="Build a platformer game"
+              className="mission-input"
+            />
+          </label>
+          <label>
+            Project (optional)
+            <select value={projectId} onChange={e => setProjectId(e.target.value)}>
+              <option value="">None</option>
+              <option value="traffic-dodge">Traffic Dodge</option>
+            </select>
+          </label>
+          <button className="primary-btn" onClick={() => void createMission()} disabled={creating || !goal.trim()}>
+            {creating ? "Creating…" : "Create Mission"}
+          </button>
+        </div>
+        {createError && <div className="state error">{createError}</div>}
+      </Panel>
+
+      <section className="panel table">
+        <div className="table-head">
+          <span>Mission</span><span>Status</span><span>Delegations</span><span>Repairs</span><span>Created</span>
+        </div>
+        <QueryState loading={q.isLoading} error={q.error} hasData={(q.data?.missions.length ?? 0) > 0}>
+          {q.data?.missions.map(m => (
+            <Link to={`/missions/${m.id}`} key={m.id} className="table-row">
+              <span><b>{m.goal}</b><small>{m.id}</small></span>
+              <Badge value={m.status} />
+              <span>{m.delegationCount}</span>
+              <span>{m.repairCount}</span>
+              <span>{formatTime(m.createdAt)}</span>
+            </Link>
+          ))}
+        </QueryState>
+        {!q.isLoading && !q.error && !q.data?.missions.length && (
+          <Empty text="No missions created yet. Use the form above to create one." />
+        )}
+      </section>
+    </Shell>
+  );
+}
+
+function MissionDetailPage() {
+  const { id = "" } = useParams();
+  const q = useQuery({
+    queryKey: ["mission", id],
+    queryFn: () => get<{ mission: MissionDetail }>(`/api/missions/${encodeURIComponent(id)}`),
+    refetchInterval: query => {
+      const status = query.state.data?.mission.mission.status;
+      return status === "running" || status === "auditing" || status === "repairing" ? 3_000 : false;
+    }
+  });
+  const detail = q.data?.mission;
+  const mission = detail?.mission;
+  const plan = detail?.plan;
+  const delegations = detail?.delegations ?? [];
+  const auditResults = detail?.auditResults ?? {};
+  const repairPlans = detail?.repairPlans ?? {};
+  const recentEvents = detail?.recentEvents ?? [];
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  const startMission = async () => {
+    setStartError(null);
+    setStarting(true);
+    try {
+      await post<{ mission: MissionDetail }>(`/api/missions/${encodeURIComponent(id)}/start`, {});
+      void q.refetch();
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : "Failed to start mission");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const progress = delegations.length > 0
+    ? { completed: delegations.filter(d => d.status === "passed").length, total: delegations.length }
+    : null;
+
+  return (
+    <Shell>
+      <PageHeader
+        eyebrow={mission ? `Mission · ${mission.id}` : "Mission"}
+        title={mission?.goal || "Mission detail"}
+        badge={mission?.status}
+      />
+      <QueryState loading={q.isLoading} error={q.error} hasData={Boolean(mission)}>
+        {mission && (
+          <>
+            <section className="stats">
+              <Stat label="Status" value={mission.status} />
+              <Stat label="Delegations" value={`${progress?.completed ?? 0}/${progress?.total ?? 0}`} />
+              <Stat label="Repairs" value={Object.keys(repairPlans).length} />
+              <Stat label="Created" value={formatTime(mission.createdAt)} />
+              <Stat label="Project" value={mission.context?.projectId ?? "None"} />
+            </section>
+
+            {(mission.status === "draft" || mission.status === "planned") && (
+              <Panel title="Actions">
+                <div className="qa-controls">
+                  <button className="primary-btn" onClick={() => void startMission()} disabled={starting}>
+                    {starting ? "Starting…" : "Start Mission"}
+                  </button>
+                </div>
+                {startError && <div className="state error">{startError}</div>}
+              </Panel>
+            )}
+
+            {plan && (
+              <Panel title="Execution plan">
+                <div className="rows">
+                  {plan.objectives.map(obj => (
+                    <div className="row stack" key={obj.id}>
+                      <span>
+                        <b>{obj.title}</b>
+                        <small>{obj.description}</small>
+                      </span>
+                      <small>{obj.delegations.length} delegation(s)</small>
+                    </div>
+                  ))}
+                </div>
+                {plan.risks.length > 0 && (
+                  <>
+                    <h3 style={{ margin: "14px 0 8px", fontSize: "13px", color: "#8290a6" }}>Risks</h3>
+                    <div className="rows">
+                      {plan.risks.map(risk => (
+                        <div className="row" key={risk.id}>
+                          <span>
+                            <b>[{risk.severity}] {risk.description}</b>
+                            {risk.mitigation && <small>Mitigation: {risk.mitigation}</small>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </Panel>
+            )}
+
+            <Panel title="Delegations">
+              {delegations.length > 0 ? (
+                <div className="timeline">
+                  {delegations.map((del, index) => {
+                    const audit = auditResults[del.id];
+                    return (
+                      <div className={`step ${del.status === "running" ? "current" : ""}`} key={del.id}>
+                        <span className={`step-dot ${del.status}`} />
+                        <div>
+                          <b>{del.title}</b>
+                          <small>{del.description}</small>
+                          {audit && (
+                            <small className={audit.status === "PASS" ? "audit-pass" : "audit-fail"}>
+                              Audit: {audit.status} — {audit.summary}
+                            </small>
+                          )}
+                        </div>
+                        <div>
+                          <Badge value={del.status} />
+                          <small>{del.pipelineType} · {formatTime(del.startedAt)}</small>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Empty text="No delegations yet. Start the mission to generate a plan." />
+              )}
+            </Panel>
+
+            {Object.keys(auditResults).length > 0 && (
+              <Panel title="Audit results">
+                <div className="rows">
+                  {Object.entries(auditResults).map(([delId, audit]) => (
+                    <div className="row stack" key={delId}>
+                      <span>
+                        <b>{audit.status} — {delId}</b>
+                        <small>{audit.summary}</small>
+                        {audit.findings.length > 0 && (
+                          <small>Findings: {audit.findings.join("; ")}</small>
+                        )}
+                      </span>
+                      <Badge value={audit.status === "PASS" ? "passed" : "failed"} />
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            )}
+
+            {recentEvents.length > 0 && (
+              <Panel title="Recent mission events">
+                <div className="event-table">
+                  {recentEvents.slice(0, 20).map(event => (
+                    <div className="event-row" key={event.id}>
+                      <span className={`dot ${event.type.includes("failed") ? "error" : "info"}`} />
+                      <span className="event-type">{event.type}</span>
+                      <span className="event-meta">{event.missionId}</span>
+                      <small>{formatClock(event.occurredAt)}</small>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            )}
+          </>
+        )}
+      </QueryState>
+    </Shell>
+  );
+}
+
 export {
   Dashboard,
+  MissionsPage,
+  MissionDetailPage,
   ProjectsPage,
   ProjectPage,
   TaskPage,
