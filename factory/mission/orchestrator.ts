@@ -12,6 +12,8 @@ import {
   createRepairPlan,
   AcceptanceCriteriaResult,
   VisualQaResult,
+  DiagnosisInput,
+  createDelegation,
 } from "./mission.js";
 import { normalizeVisualQaEvidence } from "./visual-qa-evidence.js";
 import { MissionState } from "./state.js";
@@ -19,6 +21,8 @@ import { MissionEventSink } from "./mission.js";
 import { MissionEventPublisher, createMissionEventPublisher, MissionEventTypes } from "./events.js";
 import { runGoal } from "../pipeline/pipeline-runner.js";
 import type { VisualQaAdapter } from "./visual-qa-adapter.js";
+import type { RepairExecutor, RepairExecutionResult } from "./repair-executor.js";
+import { classifyDiagnosis, generateRepairPlan } from "./diagnosis.js";
 
 export interface FactoryExecutionAdapter {
   runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string }): Promise<AgentResult>;
@@ -37,6 +41,7 @@ export interface OrchestratorConfig {
   eventSink: MissionEventSink;
   missionState: MissionState;
   visualQaAdapter?: VisualQaAdapter;
+  repairExecutor?: RepairExecutor;
 }
 
 const DEFAULT_MAX_REPAIRS = 3;
@@ -59,6 +64,7 @@ export class MissionOrchestrator {
       eventSink: config.eventSink,
       missionState: config.missionState,
       visualQaAdapter: config.visualQaAdapter,
+      repairExecutor: config.repairExecutor,
     };
     this.publisher = createMissionEventPublisher(this.config.eventSink);
   }
@@ -93,6 +99,19 @@ export class MissionOrchestrator {
         const isBuilder = delegation.description.includes("ROLE: builder") || delegation.description.includes("BUILD_COMMAND:");
         if (isBuilder && agentResult.status === "passed" && this.currentMission?.context?.requiresVisualQa) {
           await this.runVisualQa(delegation);
+
+          // Phase 9B: Self-healing loop after Visual QA failure
+          const currentQa = this.currentMission?.visualQa;
+          if (currentQa && currentQa.status === "failed" && this.config.repairExecutor) {
+            const healed = await this.selfHealingLoop(delegation);
+            if (!healed) {
+              await this.config.missionState.completeMission("failed");
+              this.currentMission = { ...this.currentMission!, status: "failed" };
+              return this.currentMission;
+            }
+            // After successful repair, continue to next delegation
+            continue;
+          }
         }
 
         const auditResult = await this.auditDelegation(delegation);
@@ -120,6 +139,251 @@ export class MissionOrchestrator {
     } finally {
       this.isRunning = false;
     }
+  }
+
+  // ─── Phase 9B: Self-Healing Loop ──────────────────────────────────
+
+  private async selfHealingLoop(buildDelegation: Delegation): Promise<boolean> {
+    const executor = this.config.repairExecutor!;
+    const maxCycles = 3;
+
+    for (let cycle = 1; cycle <= maxCycles; cycle++) {
+      if (!this.isRunning) return false;
+
+      this.currentMission = this.config.missionState.getMission();
+      buildDelegation = this.config.missionState.getDelegation(buildDelegation.id) ?? buildDelegation;
+
+      // Step 1: Create Diagnosis
+      await this.config.missionState.recordDiagnosisStarted();
+      this.publisher.publish({
+        missionId: buildDelegation.missionId,
+        type: MissionEventTypes.MISSION_DIAGNOSIS_STARTED,
+        payload: { cycle },
+      });
+
+      const diagnosisInput = this.buildDiagnosisInput(buildDelegation);
+      const diagnosis = classifyDiagnosis(diagnosisInput);
+
+      // Step 2: Generate RepairPlan
+      const repairPlan = generateRepairPlan(diagnosisInput, diagnosis, maxCycles);
+
+      await this.config.missionState.recordDiagnosisCompleted(diagnosis, repairPlan);
+      this.publisher.publish({
+        missionId: buildDelegation.missionId,
+        type: MissionEventTypes.MISSION_DIAGNOSIS_COMPLETED,
+        payload: {
+          diagnosisId: diagnosis.id,
+          category: diagnosis.category,
+          severity: diagnosis.severity,
+          confidence: diagnosis.confidence,
+          repairPlanId: repairPlan.id,
+          actionCount: repairPlan.actions.length,
+          cycle,
+        },
+      });
+
+      // Step 3: Execute Repair
+      await this.config.missionState.recordRepairStarted(repairPlan.id, cycle);
+      this.publisher.publish({
+        missionId: buildDelegation.missionId,
+        type: MissionEventTypes.MISSION_REPAIR_STARTED,
+        payload: { repairPlanId: repairPlan.id, cycle, actionCount: repairPlan.actions.length },
+      });
+
+      let repairResult: RepairExecutionResult;
+      try {
+        repairResult = await executor.execute(
+          this.currentMission!,
+          repairPlan,
+          this.config.project
+        );
+      } catch (error) {
+        repairResult = {
+          status: "failed",
+          changedFiles: [],
+          actionsCompleted: 0,
+          actionsFailed: repairPlan.actions.length,
+          summary: `Repair execution error: ${error instanceof Error ? error.message : String(error)}`,
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+        };
+      }
+
+      if (repairResult.status === "rejected" || repairResult.status === "failed") {
+        await this.config.missionState.recordRepairFailed(repairPlan.id, cycle, repairResult.summary);
+        this.publisher.publish({
+          missionId: buildDelegation.missionId,
+          type: MissionEventTypes.MISSION_REPAIR_FAILED,
+          payload: {
+            repairPlanId: repairPlan.id,
+            cycle,
+            status: repairResult.status,
+            summary: repairResult.summary,
+            changedFileCount: repairResult.changedFiles.length,
+            actionCount: repairPlan.actions.length,
+          },
+        });
+
+        if (cycle >= maxCycles) return false;
+        continue;
+      }
+
+      await this.config.missionState.recordRepairCompleted(repairPlan.id, cycle, {
+        status: repairResult.status,
+        changedFiles: repairResult.changedFiles,
+        actionsCompleted: repairResult.actionsCompleted,
+        actionsFailed: repairResult.actionsFailed,
+      });
+      this.publisher.publish({
+        missionId: buildDelegation.missionId,
+        type: MissionEventTypes.MISSION_REPAIR_COMPLETED,
+        payload: {
+          repairPlanId: repairPlan.id,
+          cycle,
+          status: repairResult.status,
+          changedFileCount: repairResult.changedFiles.length,
+          actionCount: repairResult.actionsCompleted,
+        },
+      });
+
+      // Step 4: Rebuild (create fresh build delegation)
+      const buildResult = await this.executeRebuildDelegation(buildDelegation, cycle);
+      if (buildResult.status === "failed") {
+        if (cycle >= maxCycles) return false;
+        continue;
+      }
+
+      // Step 5: Re-run Visual QA (if verification plan includes it)
+      if (repairPlan.verificationPlan.steps.includes("visual-qa")) {
+        const freshBuildDelegation = this.createRebuildDelegation(buildDelegation, cycle);
+        await this.runVisualQa(freshBuildDelegation);
+
+        const currentQa = this.currentMission?.visualQa;
+        if (currentQa && currentQa.status === "failed") {
+          if (cycle >= maxCycles) return false;
+          continue;
+        }
+      }
+
+      // Step 6: Fresh audit on post-repair state
+      this.currentMission = this.config.missionState.getMission();
+      const freshBuildDel = this.createRebuildDelegation(buildDelegation, cycle);
+      const auditResult = await this.auditDelegation(freshBuildDel);
+
+      if (auditResult.status === "PASS") {
+        return true;
+      }
+
+      if (cycle >= maxCycles) return false;
+    }
+
+    return false;
+  }
+
+  private buildDiagnosisInput(buildDelegation: Delegation): DiagnosisInput {
+    const mission = this.currentMission!;
+    const qaResult = mission.visualQa;
+    const qaEvidence = mission.visualQaEvidence;
+
+    const failedChecks: Array<{ name: string; viewport: string; message?: string }> = [];
+    if (qaResult?.checkDetails) {
+      for (const check of qaResult.checkDetails) {
+        if (check.status === "failed") {
+          failedChecks.push({
+            name: check.name,
+            viewport: check.viewport,
+            message: check.message,
+          });
+        }
+      }
+    }
+
+    return {
+      missionId: mission.id,
+      projectId: mission.context?.projectId ?? "unknown",
+      projectPath: this.config.project,
+      acceptanceCriteria: buildDelegation.acceptanceCriteria,
+      buildFailed: buildResultFromDelegation(buildDelegation) === "failed",
+      buildError: buildDelegation.error,
+      runtimeErrors: qaResult?.errors ?? [],
+      visualQaStatus: qaResult?.status ?? "skipped",
+      visualQaEvidence: qaEvidence,
+      failedChecks,
+      artifactMetadata: (qaResult?.artifacts ?? []).map((a) => ({
+        id: a.id,
+        type: a.type,
+        label: a.label,
+      })),
+      affectedFiles: this.extractAffectedFiles(buildDelegation),
+    };
+  }
+
+  private extractAffectedFiles(delegation: Delegation): string[] {
+    const files: string[] = [];
+    const output = delegation.result ?? "";
+    const filePattern = /\b([\w/.-]+\.(?:ts|js|json|html|css))\b/g;
+    let match;
+    while ((match = filePattern.exec(output)) !== null) {
+      files.push(match[1]);
+    }
+    return [...new Set(files)];
+  }
+
+  private async executeRebuildDelegation(originalDelegation: Delegation, cycle: number): Promise<AgentResult> {
+    const rebuildDelegation = this.createRebuildDelegation(originalDelegation, cycle);
+
+    await this.config.missionState.addDelegation(rebuildDelegation);
+    await this.config.missionState.startDelegation(rebuildDelegation.id, "");
+
+    let agentResult: AgentResult;
+    try {
+      const adapterResult = await this.config.factoryAdapter.runDelegation(
+        rebuildDelegation,
+        this.currentMission!,
+        { baseDir: this.config.baseDir, project: this.config.project }
+      );
+
+      agentResult = {
+        delegationId: rebuildDelegation.id,
+        pipelineId: adapterResult.pipelineId,
+        status: adapterResult.status,
+        output: adapterResult.output,
+        error: adapterResult.error,
+        durationMs: adapterResult.durationMs,
+      };
+    } catch (error) {
+      agentResult = {
+        delegationId: rebuildDelegation.id,
+        status: "failed",
+        output: "",
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: 0,
+      };
+    }
+
+    const finalStatus: DelegationStatus = agentResult.status === "passed" ? "passed" : "failed";
+    await this.config.missionState.completeDelegation(
+      rebuildDelegation.id,
+      finalStatus,
+      agentResult.output,
+      agentResult.error
+    );
+
+    return agentResult;
+  }
+
+  private createRebuildDelegation(original: Delegation, cycle: number): Delegation {
+    return {
+      ...original,
+      id: `rebuild-${original.id}-cycle-${cycle}`,
+      title: `[REBUILD cycle ${cycle}] ${original.title}`,
+      description: original.description,
+      stepIds: undefined,
+      dependsOn: [],
+      parallelizable: false,
+      status: "queued",
+      createdAt: new Date().toISOString(),
+    };
   }
 
   async executeDelegation(delegation: Delegation): Promise<AgentResult> {
@@ -613,6 +877,10 @@ function evaluateGenericCriterion(criterion: string, output: string): { passed: 
     return { passed: true, evidence: `Keywords matched: ${matched.join(", ")}` };
   }
   return { passed: false, evidence: "No criterion keywords found in output" };
+}
+
+function buildResultFromDelegation(delegation: Delegation): "passed" | "failed" {
+  return delegation.status === "passed" ? "passed" : "failed";
 }
 
 // ─── DeterministicAuditor ───────────────────────────────────────────

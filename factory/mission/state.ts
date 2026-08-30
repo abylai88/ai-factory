@@ -35,6 +35,7 @@ export interface MissionSnapshot {
   currentDelegationIndex: number;
   diagnosis: Diagnosis | null;
   diagnosisRepairPlan: DiagnosisRepairPlan | null;
+  repairCycleCount: number;
   updatedAt: string;
 }
 
@@ -55,6 +56,7 @@ const SNAPSHOT_SCHEMA = z.object({
   currentDelegationIndex: z.number().int().nonnegative(),
   diagnosis: DiagnosisSchema.nullable().optional(),
   diagnosisRepairPlan: DiagnosisRepairPlanSchema.nullable().optional(),
+  repairCycleCount: z.number().int().nonnegative().optional(),
   updatedAt: z.string(),
 });
 
@@ -75,6 +77,7 @@ export class MissionState {
   private repairPlans: Record<string, RepairPlan> = {};
   private diagnosis: Diagnosis | null = null;
   private diagnosisRepairPlan: DiagnosisRepairPlan | null = null;
+  private repairCycleCount = 0;
 
   constructor(baseDir: string, missionId: string) {
     const sanitized = sanitizeMissionId(missionId);
@@ -90,6 +93,7 @@ export class MissionState {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       currentDelegationIndex: 0,
+      repairCycleCount: 0,
     };
   }
 
@@ -115,6 +119,7 @@ export class MissionState {
     this.repairPlans = validated.repairPlans;
     this.diagnosis = validated.diagnosis ?? null;
     this.diagnosisRepairPlan = validated.diagnosisRepairPlan ?? null;
+    this.repairCycleCount = validated.repairCycleCount ?? 0;
   }
 
   private async loadFromJsonl(): Promise<void> {
@@ -232,6 +237,29 @@ export class MissionState {
         }
         this.mission.status = "diagnosis-planned";
         break;
+      case "mission.repair.started":
+        this.mission.status = "repairing";
+        this.repairCycleCount = (payload.cycle as number) ?? this.repairCycleCount;
+        this.mission.repairCycleCount = this.repairCycleCount;
+        break;
+      case "mission.repair.completed":
+        this.mission.status = "running";
+        this.repairCycleCount = (payload.cycle as number) ?? this.repairCycleCount;
+        this.mission.repairCycleCount = this.repairCycleCount;
+        if (payload.changedFiles) {
+          (this.mission as any).repairExecutionResult = {
+            status: payload.status,
+            changedFiles: payload.changedFiles,
+            actionsCompleted: payload.actionsCompleted,
+            actionsFailed: payload.actionsFailed,
+          };
+        }
+        break;
+      case "mission.repair.failed":
+        this.mission.status = "repairing";
+        this.repairCycleCount = (payload.cycle as number) ?? this.repairCycleCount;
+        this.mission.repairCycleCount = this.repairCycleCount;
+        break;
     }
 
     this.mission.updatedAt = new Date().toISOString();
@@ -266,6 +294,7 @@ export class MissionState {
       currentDelegationIndex: this.mission.currentDelegationIndex,
       diagnosis: this.diagnosis,
       diagnosisRepairPlan: this.diagnosisRepairPlan,
+      repairCycleCount: this.repairCycleCount,
       updatedAt: new Date().toISOString(),
     };
 
@@ -319,6 +348,10 @@ export class MissionState {
 
   getDiagnosisRepairPlan(): DiagnosisRepairPlan | null {
     return this.diagnosisRepairPlan ? { ...this.diagnosisRepairPlan } : null;
+  }
+
+  getRepairCycleCount(): number {
+    return this.repairCycleCount;
   }
 
   async setMission(mission: Mission): Promise<void> {
@@ -437,6 +470,49 @@ export class MissionState {
         diagnosis,
         repairPlan,
       },
+    });
+  }
+
+  async recordRepairStarted(repairPlanId: string, cycle: number): Promise<void> {
+    this.mission.status = "repairing";
+    this.repairCycleCount = cycle;
+    this.mission.repairCycleCount = cycle;
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.repair.started",
+      payload: { repairPlanId, cycle },
+    });
+  }
+
+  async recordRepairCompleted(
+    repairPlanId: string,
+    cycle: number,
+    result: {
+      status: string;
+      changedFiles: string[];
+      actionsCompleted: number;
+      actionsFailed: number;
+    }
+  ): Promise<void> {
+    this.mission.status = "running";
+    this.repairCycleCount = cycle;
+    this.mission.repairCycleCount = cycle;
+    (this.mission as any).repairExecutionResult = result;
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.repair.completed",
+      payload: { repairPlanId, cycle, ...result },
+    });
+  }
+
+  async recordRepairFailed(repairPlanId: string, cycle: number, error: string): Promise<void> {
+    this.mission.status = "repairing";
+    this.repairCycleCount = cycle;
+    this.mission.repairCycleCount = cycle;
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.repair.failed",
+      payload: { repairPlanId, cycle, error },
     });
   }
 

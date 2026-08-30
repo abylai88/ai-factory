@@ -188,6 +188,8 @@ export const MissionSchema = z.object({
   visualQaEvidence: VisualQaEvidenceSchema.optional(),
   diagnosis: DiagnosisSchema.optional(),
   diagnosisRepairPlan: DiagnosisRepairPlanSchema.optional(),
+  repairCycleCount: z.number().int().nonnegative().default(0),
+  repairExecutionResult: z.any().optional(),
 });
 export type Mission = z.infer<typeof MissionSchema>;
 
@@ -320,6 +322,9 @@ export const MissionEventSchema = z.object({
     "mission.visual_qa.skipped",
     "mission.diagnosis.started",
     "mission.diagnosis.completed",
+    "mission.repair.started",
+    "mission.repair.completed",
+    "mission.repair.failed",
   ]),
   payload: z.record(z.string(), z.unknown()),
 });
@@ -387,6 +392,7 @@ export function createMission(goal: string, context?: MissionContext, constraint
     createdAt: now,
     updatedAt: now,
     currentDelegationIndex: 0,
+    repairCycleCount: 0,
   };
 }
 
