@@ -51,3 +51,23 @@ export const FactoryEventSchema = z.object({
 export type FactoryEvent = z.infer<typeof FactoryEventSchema>;
 export const ArtifactSchema = z.object({ id: z.string(), type: z.enum(["screenshot", "trace", "report"]), createdAt: z.string(), label: z.string(), available: z.boolean() });
 export type Artifact = z.infer<typeof ArtifactSchema>;
+
+export const DiagnosticRecordSchema = z.object({
+  source: z.string(),
+  message: z.string(),
+  occurredAt: z.string().optional()
+});
+export type DiagnosticRecord = z.infer<typeof DiagnosticRecordSchema>;
+
+export const VisualQaStatusSchema = z.object({
+  status: z.literal("not_available"),
+  message: z.string(),
+  artifacts: z.array(ArtifactSchema)
+});
+export type VisualQaStatus = z.infer<typeof VisualQaStatusSchema>;
+
+export const HermesStatusSchema = z.object({
+  available: z.boolean(),
+  summary: z.string()
+});
+export type HermesStatus = z.infer<typeof HermesStatusSchema>;

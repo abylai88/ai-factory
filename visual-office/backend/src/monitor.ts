@@ -13,7 +13,26 @@ export class FactoryMonitor {
     for (const diagnostic of this.adapter.consumeDiagnostics()) this.events.publish({ type: "diagnostic", severity: "warning", payload: { source: diagnostic.source, message: diagnostic.message } });
   }
   private schedule = () => { if (this.timer) clearTimeout(this.timer); this.timer = setTimeout(() => void this.refresh(), this.debounceMs); };
-  async start() { await this.refresh(); for (const dir of [path.join(this.adapter.config.factoryRoot, "outputs", "pipelines"), path.join(this.adapter.config.factoryRoot, "tasks")]) { try { this.watchers.push(watch(dir, { recursive: false }, this.schedule)); } catch { this.events.publish({ type: "diagnostic", severity: "warning", payload: { source: dir, message: "File watching unavailable; polling remains active" } }); } } this.poll = setInterval(() => void this.refresh(), this.pollMs); }
+  async start() {
+    await this.refresh();
+    const watchDirs = [
+      path.join(this.adapter.config.factoryRoot, "outputs", "pipelines"),
+      path.join(this.adapter.config.factoryRoot, "tasks"),
+      path.join(this.adapter.config.factoryRoot, "agents", "opencode")
+    ];
+    for (const dir of watchDirs) {
+      try {
+        this.watchers.push(watch(dir, { recursive: false }, this.schedule));
+      } catch {
+        this.events.publish({
+          type: "diagnostic",
+          severity: "warning",
+          payload: { source: dir, message: "File watching unavailable; polling remains active" }
+        });
+      }
+    }
+    this.poll = setInterval(() => void this.refresh(), this.pollMs);
+  }
   stop() { if (this.timer) clearTimeout(this.timer); if (this.poll) clearInterval(this.poll); this.watchers.forEach(w => w.close()); }
 }
 

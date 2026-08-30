@@ -6,7 +6,19 @@ export interface FactoryAdapterConfig { factoryRoot: string; }
 export interface AdapterDiagnostic { source: string; message: string; }
 const redact = (value?: string) => value?.replace(/(sk-[A-Za-z0-9_-]{12,}|(?:api[_-]?key|token|secret)\s*[:=]\s*)\S+/gi, "$1[REDACTED]");
 const typeFor = (id: string): "game" | "engineering" | "unknown" => id.startsWith("game-") ? "game" : id.startsWith("engineering-") ? "engineering" : "unknown";
-const normalizedStatus = (status: string): "running" | "passed" | "failed" | "unknown" => status === "running" || status === "passed" || status === "failed" ? status : "unknown";
+const normalizedStatus = (status: string): "running" | "passed" | "failed" | "unknown" =>
+  status === "running" || status === "passed" || status === "failed" ? status : "unknown";
+
+type StepStatus = "queued" | "running" | "passed" | "failed" | "skipped" | "unknown";
+
+function stepStatus(entryStatus: string, stepId: string, currentStepId: string | undefined, pipelineStatus: string): StepStatus {
+  if (entryStatus === "passed") return "passed";
+  if (entryStatus === "failed") return "failed";
+  if (entryStatus === "skipped") return "skipped";
+  if (entryStatus === "running" || (stepId === currentStepId && pipelineStatus === "running")) return "running";
+  if (entryStatus === "queued") return "queued";
+  return "unknown";
+}
 const projectIdForFolder = (folder: string) => folder.replace(/^project-/, "");
 
 export class FactoryAdapter {
@@ -34,9 +46,27 @@ export class FactoryAdapter {
     const raw = await this.json(file); if (raw === undefined) return undefined;
     const parsed = PipelineStateFileSchema.safeParse(raw);
     if (!parsed.success) { this.diagnostic(file, "Pipeline JSON does not match the supported factory format"); return undefined; }
-    const { state, entries = [] } = parsed.data; const type = typeFor(state.pipelineId);
-    const steps: Array<{ id: string; title?: string; role?: string; agent?: string; status: "queued" | "running" | "passed" | "failed" | "skipped" | "unknown" }> = entries.map(entry => ({ id: entry.stepId, title: entry.title, role: entry.role, status: entry.status === "passed" ? "passed" : entry.status === "failed" ? "failed" : "unknown" }));
-    if (state.currentStepId && !steps.some(s => s.id === state.currentStepId)) steps.push({ id: state.currentStepId, status: state.status === "running" ? "running" : "unknown" });
+    const { state, entries = [] } = parsed.data;
+    const type = typeFor(state.pipelineId);
+    const steps: Array<{
+      id: string;
+      title?: string;
+      role?: string;
+      agent?: string;
+      status: StepStatus;
+    }> = entries.map(entry => ({
+      id: entry.stepId,
+      title: entry.title,
+      role: entry.role,
+      agent: entry.role,
+      status: stepStatus(entry.status, entry.stepId, state.currentStepId, state.status)
+    }));
+    if (state.currentStepId && !steps.some(s => s.id === state.currentStepId)) {
+      steps.push({
+        id: state.currentStepId,
+        status: state.status === "running" ? "running" : normalizedStatus(state.status) === "passed" ? "passed" : "unknown"
+      });
+    }
     const snapshot = { id: state.pipelineId, goal: state.goal ?? "", project: state.project ?? "", type, status: normalizedStatus(state.status), currentStepId: state.currentStepId, startedAt: state.startedAt, finishedAt: state.finishedAt, entries: entries.map(e => ({ ...e, output: redact(e.output) ?? "" })), steps, errors: (state.errors ?? []).map(e => ({ stepId: e.stepId, message: redact(e.message) ?? "", timestamp: e.timestamp })), engine: state.engine, stack: state.stack };
     return PipelineSnapshotSchema.parse(snapshot);
   }
@@ -54,15 +84,39 @@ export class FactoryAdapter {
   }
   async getTasks(projectId: string): Promise<TaskSnapshot[] | undefined> {
     if (!/^[A-Za-z0-9._-]+$/.test(projectId)) return undefined;
-    const file = path.join(this.tasksDir, `project-${projectId}`, "tasks.json"); const raw = await this.json(file); if (raw === undefined) return undefined;
-    const parsed = TaskFileSchema.safeParse(raw); if (!parsed.success) { this.diagnostic(file, "Task JSON does not match the supported factory format"); return undefined; }
-    return parsed.data.map(task => TaskSnapshotSchema.parse({ ...task, description: task.description ?? "", attempts: task.attempts ?? 0, result: redact(task.result), error: redact(task.error), attemptHistory: parseAttempts(task.attemptHistory) }));
+    const file = path.join(this.tasksDir, `project-${projectId}`, "tasks.json");
+    const raw = await this.json(file);
+    if (raw === undefined) return undefined;
+    const parsed = TaskFileSchema.safeParse(raw);
+    if (!parsed.success) { this.diagnostic(file, "Task JSON does not match the supported factory format"); return undefined; }
+    return parsed.data.map(task => this.toTaskSnapshot(task));
+  }
+
+  async getTask(projectId: string, taskId: string): Promise<TaskSnapshot | undefined> {
+    if (!/^[A-Za-z0-9._-]+$/.test(projectId) || !/^[A-Za-z0-9._-]+$/.test(taskId)) return undefined;
+    const tasks = await this.getTasks(projectId);
+    return tasks?.find(task => task.id === taskId);
+  }
+
+  private toTaskSnapshot(task: (typeof TaskFileSchema)["_output"][number]): TaskSnapshot {
+    return TaskSnapshotSchema.parse({
+      ...task,
+      description: task.description ?? "",
+      attempts: task.attempts ?? 0,
+      result: redact(task.result),
+      error: redact(task.error),
+      attemptHistory: parseAttempts(task.attemptHistory)
+    });
   }
   async listAgents(): Promise<AgentDescriptor[]> { return (await Promise.all((await this.files(this.agentsDir, ".md")).map(file => this.agentFromFile(file)))).filter((x): x is AgentDescriptor => Boolean(x)).sort((a,b) => a.name.localeCompare(b.name)); }
   async getAgent(name: string): Promise<AgentDescriptor | undefined> { if (!/^[a-z0-9_-]+$/i.test(name)) return undefined; return this.agentFromFile(path.join(this.agentsDir, `${name}.md`)); }
   private async agentFromFile(file: string): Promise<AgentDescriptor | undefined> {
-    let text: string; try { text = await fs.readFile(file, "utf8"); } catch { return undefined; }
-    const name = path.basename(file, ".md"); const description = text.match(/^description:\s*(.+)$/m)?.[1]?.trim(); const canEdit = /^\s*edit:\s*allow\s*$/m.test(text) ? true : /^\s*edit:\s*deny\s*$/m.test(text) ? false : undefined;
+    let text: string;
+    try { text = await fs.readFile(file, "utf8"); } catch { return undefined; }
+    const name = path.basename(file, ".md");
+    const description = text.match(/^description:\s*(.+)$/m)?.[1]?.trim()
+      ?? text.match(/^#\s+(.+)$/m)?.[1]?.trim();
+    const canEdit = /^\s*edit:\s*allow\s*$/m.test(text) ? true : /^\s*edit:\s*deny\s*$/m.test(text) ? false : undefined;
     return AgentDescriptorSchema.parse({ name, role: name, description, canEdit, source: "agents/opencode" });
   }
 }

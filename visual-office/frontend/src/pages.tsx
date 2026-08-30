@@ -1,0 +1,496 @@
+import { useQuery } from "@tanstack/react-query";
+import { Link, useParams } from "react-router-dom";
+import type {
+  AgentDescriptor,
+  DiagnosticRecord,
+  FactoryEvent,
+  HermesStatus,
+  PipelineSnapshot,
+  ProjectSnapshot,
+  TaskSnapshot,
+  VisualQaStatus
+} from "@shared";
+import { get } from "./api.js";
+import {
+  Badge,
+  Empty,
+  PageHeader,
+  Panel,
+  QueryState,
+  Shell,
+  Stat,
+  formatClock,
+  formatTime,
+  truncate
+} from "./components.js";
+import { useOffice } from "./store.js";
+
+function Dashboard() {
+  const pipelines = useQuery({ queryKey: ["pipelines"], queryFn: () => get<{ pipelines: PipelineSnapshot[] }>("/api/pipelines") });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => get<{ projects: ProjectSnapshot[] }>("/api/projects") });
+  const agents = useQuery({ queryKey: ["agents"], queryFn: () => get<{ agents: AgentDescriptor[] }>("/api/agents") });
+  const visualQa = useQuery({ queryKey: ["visual-qa"], queryFn: () => get<{ visualQa: VisualQaStatus }>("/api/visual-qa/status") });
+  const events = useOffice(s => s.events);
+  const running = pipelines.data?.pipelines.filter(p => p.status === "running") ?? [];
+  const failed = pipelines.data?.pipelines.filter(p => p.status === "failed") ?? [];
+
+  return (
+    <Shell>
+      <PageHeader eyebrow="Factory observability" title="Control room" badge="read-only" />
+      <section className="stats">
+        <Stat label="Active pipelines" value={pipelines.isLoading ? "—" : running.length} />
+        <Stat label="Failed pipelines" value={pipelines.isLoading ? "—" : failed.length} />
+        <Stat label="Projects" value={projects.data?.projects.length ?? "—"} />
+        <Stat label="Agents" value={agents.data?.agents.length ?? "—"} />
+        <Stat label="Visual QA" value="Not available" hint={visualQa.data?.visualQa.message ?? "Phase 1 interface"} />
+      </section>
+
+      <section className="grid two">
+        <Panel title="Pipeline activity" action="View all" to="/pipelines">
+          <QueryState loading={pipelines.isLoading} error={pipelines.error} hasData={running.length > 0}>
+            <div className="rows">
+              {running.map(p => (
+                <Link className="row" to={`/pipelines/${p.id}`} key={p.id}>
+                  <span>
+                    <b>{p.goal || "Unnamed pipeline"}</b>
+                    <small>{p.project || "Unknown project"}</small>
+                  </span>
+                  <span>
+                    <Badge value={p.status} />
+                    <small>Step: {p.currentStepId ?? "Unknown"}</small>
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </QueryState>
+          {!pipelines.isLoading && !pipelines.error && running.length === 0 && (
+            <Empty text="No active pipelines reported by Factory." />
+          )}
+        </Panel>
+
+        <Panel title="Recent events" action="View all" to="/events">
+          {events.length ? (
+            <div className="events">
+              {events.slice(0, 8).map(e => (
+                <div key={e.id}>
+                  <span className={`dot ${e.severity}`} />
+                  <span className="event-type">{e.type}</span>
+                  <small>{formatClock(e.occurredAt)}</small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty text="Waiting for real Factory file changes." />
+          )}
+        </Panel>
+      </section>
+
+      <section className="grid two">
+        <Panel title="Active agents">
+          {running.length ? running.map(p => {
+            const step = p.steps.find(s => s.id === p.currentStepId);
+            return (
+              <div className="agent-line" key={p.id}>
+                <i>◉</i>
+                <span>
+                  {step?.agent ?? step?.role ?? "Unknown"}
+                  <small>{step?.role ?? "Current role unavailable"}</small>
+                </span>
+                <Badge value="running" />
+              </div>
+            );
+          }) : <Empty text="No active agents." />}
+        </Panel>
+
+        <Panel title="Recent pipelines">
+          <QueryState loading={pipelines.isLoading} error={pipelines.error} hasData={(pipelines.data?.pipelines.length ?? 0) > 0}>
+            <div className="rows">
+              {pipelines.data?.pipelines.slice(0, 6).map(p => (
+                <Link className="row" to={`/pipelines/${p.id}`} key={p.id}>
+                  <span>
+                    <b>{p.goal || "Unnamed pipeline"}</b>
+                    <small>{p.type} · {formatTime(p.startedAt)}</small>
+                  </span>
+                  <Badge value={p.status} />
+                </Link>
+              ))}
+            </div>
+          </QueryState>
+        </Panel>
+      </section>
+    </Shell>
+  );
+}
+
+function ProjectsPage() {
+  const q = useQuery({ queryKey: ["projects"], queryFn: () => get<{ projects: ProjectSnapshot[] }>("/api/projects") });
+  return (
+    <Shell>
+      <PageHeader eyebrow="Allowlisted Factory workspaces" title="Projects" />
+      <section className="panel table">
+        <div className="table-head">
+          <span>Project</span><span>Type</span><span>Current step</span><span>Progress</span><span>Status</span>
+        </div>
+        <QueryState loading={q.isLoading} error={q.error} hasData={(q.data?.projects.length ?? 0) > 0}>
+          {q.data?.projects.map(p => (
+            <Link to={`/projects/${p.id}`} key={p.id} className="table-row">
+              <span><b>{p.name}</b><small>{p.path || "Path not available"}</small></span>
+              <span>{p.pipelineType}</span>
+              <span>{p.currentStepId ?? "Unknown"}</span>
+              <span>{p.progress.complete}/{p.progress.total || "—"}</span>
+              <Badge value={p.status} />
+            </Link>
+          ))}
+        </QueryState>
+        {!q.isLoading && !q.error && !q.data?.projects.length && (
+          <Empty text="No projects have task or pipeline data." />
+        )}
+      </section>
+    </Shell>
+  );
+}
+
+function ProjectPage() {
+  const { id = "" } = useParams();
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => get<{ projects: ProjectSnapshot[] }>("/api/projects") });
+  const tasks = useQuery({ queryKey: ["tasks", id], queryFn: () => get<{ tasks: TaskSnapshot[] }>(`/api/projects/${encodeURIComponent(id)}/tasks`) });
+  const project = projects.data?.projects.find(p => p.id === id);
+
+  return (
+    <Shell>
+      <PageHeader
+        eyebrow={project?.path || "Path not available"}
+        title={project?.name || "Unknown project"}
+        badge={project?.status}
+      />
+      <section className="stats">
+        <Stat label="Pipeline" value={project?.pipelineType ?? "Unknown"} />
+        <Stat label="Current step" value={project?.currentStepId ?? "Unknown"} />
+        <Stat label="Build" value={project?.buildStatus ?? "Unknown"} />
+        <Stat label="QA" value={project?.qaStatus === "unknown" ? "Not available" : project?.qaStatus ?? "Unknown"} />
+      </section>
+      <Panel title="Tasks">
+        <QueryState loading={tasks.isLoading} error={tasks.error} hasData={(tasks.data?.tasks.length ?? 0) > 0}>
+          <div className="rows">
+            {tasks.data?.tasks.map(task => (
+              <Link className="row" to={`/projects/${id}/tasks/${task.id}`} key={task.id}>
+                <span>
+                  <b>{task.title}</b>
+                  <small>{task.agent ?? "Unknown agent"} · {task.role}</small>
+                </span>
+                <span>
+                  <Badge value={task.status} />
+                  <small>Attempt {task.attempts} · {task.model ?? "Unknown model"}</small>
+                </span>
+              </Link>
+            ))}
+          </div>
+        </QueryState>
+        {!tasks.isLoading && !tasks.error && !tasks.data?.tasks.length && (
+          <Empty text="No task snapshot is available for this project." />
+        )}
+      </Panel>
+    </Shell>
+  );
+}
+
+function TaskPage() {
+  const { id = "", taskId = "" } = useParams();
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => get<{ projects: ProjectSnapshot[] }>("/api/projects") });
+  const task = useQuery({
+    queryKey: ["task", id, taskId],
+    queryFn: () => get<{ task: TaskSnapshot }>(`/api/projects/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}`)
+  });
+  const project = projects.data?.projects.find(p => p.id === id);
+  const t = task.data?.task;
+
+  return (
+    <Shell>
+      <PageHeader
+        eyebrow={`${project?.name ?? "Unknown project"} · ${t?.role ?? "Unknown role"}`}
+        title={t?.title ?? "Task not available"}
+        badge={t?.status}
+      />
+      <QueryState loading={task.isLoading} error={task.error} hasData={Boolean(t)}>
+        {t && (
+          <>
+            <section className="stats">
+              <Stat label="Agent" value={t.agent ?? "Unknown"} />
+              <Stat label="Model" value={t.model ?? "Unknown"} />
+              <Stat label="Attempts" value={t.attempts} />
+              <Stat label="Updated" value={formatTime(t.updatedAt)} />
+            </section>
+            {t.error && (
+              <Panel title="Error">
+                <pre className="code-block error-text">{t.error}</pre>
+              </Panel>
+            )}
+            {t.attemptHistory && t.attemptHistory.length > 0 && (
+              <Panel title="Attempt history">
+                <div className="rows">
+                  {t.attemptHistory.map((attempt, index) => (
+                    <div className="row" key={`${attempt.attempt}-${index}`}>
+                      <span>
+                        <b>Attempt {attempt.attempt}</b>
+                        <small>{attempt.model} · {attempt.errorType}</small>
+                      </span>
+                      <Badge value={attempt.status} />
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            )}
+            <Panel title="Description">
+              <pre className="code-block">{truncate(t.description, 2000)}</pre>
+            </Panel>
+            {t.result && (
+              <Panel title="Agent output">
+                <pre className="code-block">{truncate(t.result, 4000)}</pre>
+              </Panel>
+            )}
+          </>
+        )}
+      </QueryState>
+    </Shell>
+  );
+}
+
+function PipelinesPage() {
+  const q = useQuery({ queryKey: ["pipelines"], queryFn: () => get<{ pipelines: PipelineSnapshot[] }>("/api/pipelines") });
+  return (
+    <Shell>
+      <PageHeader eyebrow="Pipeline snapshots" title="Pipelines" />
+      <section className="panel table">
+        <div className="table-head pipelines">
+          <span>Pipeline</span><span>Type</span><span>Project</span><span>Started</span><span>Status</span>
+        </div>
+        <QueryState loading={q.isLoading} error={q.error} hasData={(q.data?.pipelines.length ?? 0) > 0}>
+          {q.data?.pipelines.map(p => (
+            <Link to={`/pipelines/${p.id}`} key={p.id} className="table-row pipelines">
+              <span><b>{p.goal || p.id}</b><small>{p.id}</small></span>
+              <span>{p.type}</span>
+              <span><small>{p.project || "Unknown"}</small></span>
+              <span>{formatTime(p.startedAt)}</span>
+              <Badge value={p.status} />
+            </Link>
+          ))}
+        </QueryState>
+        {!q.isLoading && !q.error && !q.data?.pipelines.length && (
+          <Empty text="No pipeline snapshots found in outputs/pipelines." />
+        )}
+      </section>
+    </Shell>
+  );
+}
+
+function PipelinePage() {
+  const { id = "" } = useParams();
+  const q = useQuery({
+    queryKey: ["pipeline", id],
+    queryFn: () => get<{ pipeline: PipelineSnapshot }>(`/api/pipelines/${encodeURIComponent(id)}`)
+  });
+  const p = q.data?.pipeline;
+
+  return (
+    <Shell>
+      <PageHeader
+        eyebrow={`${p?.type ?? "Unknown"} pipeline · ${p?.project || "Unknown project"}`}
+        title={p?.goal || "Pipeline not available"}
+        badge={p?.status}
+      />
+      <QueryState loading={q.isLoading} error={q.error} hasData={Boolean(p)}>
+        {p && (
+          <>
+            <section className="stats">
+              <Stat label="Engine" value={p.engine ?? "Unknown"} />
+              <Stat label="Stack" value={p.stack ?? "Unknown"} />
+              <Stat label="Current step" value={p.currentStepId ?? "Unknown"} />
+              <Stat label="Finished" value={formatTime(p.finishedAt)} />
+            </section>
+
+            {p.errors.length > 0 && (
+              <Panel title="Errors & diagnostics">
+                <div className="rows">
+                  {p.errors.map((error, index) => (
+                    <div className="row" key={`${error.timestamp}-${index}`}>
+                      <span>
+                        <b>{error.stepId ?? "Pipeline"}</b>
+                        <small>{error.message}</small>
+                      </span>
+                      <small>{formatClock(error.timestamp)}</small>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            )}
+
+            <Panel title="Pipeline steps">
+              <div className="timeline">
+                {p.steps.map(step => (
+                  <div className={`step ${step.id === p.currentStepId ? "current" : ""}`} key={step.id}>
+                    <span className={`step-dot ${step.status}`} />
+                    <div>
+                      <b>{step.title ?? step.id}</b>
+                      <small>{step.id} · {step.role ?? "Unknown role"} · {step.agent ?? "Unknown agent"}</small>
+                    </div>
+                    <div>
+                      <Badge value={step.status} />
+                      <small>Attempt {step.attempt ?? "—"} · {step.model ?? "Unknown model"}</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+
+            {p.entries.length > 0 && (
+              <Panel title="Step outputs">
+                <div className="rows">
+                  {p.entries.map(entry => (
+                    <div className="row stack" key={`${entry.stepId}-${entry.timestamp}`}>
+                      <span>
+                        <b>{entry.title}</b>
+                        <small>{entry.stepId} · {entry.role} · {formatClock(entry.timestamp)}</small>
+                        <pre className="code-block compact">{truncate(entry.output, 600)}</pre>
+                      </span>
+                      <Badge value={entry.status} />
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            )}
+          </>
+        )}
+      </QueryState>
+    </Shell>
+  );
+}
+
+function AgentsPage() {
+  const q = useQuery({ queryKey: ["agents"], queryFn: () => get<{ agents: AgentDescriptor[] }>("/api/agents") });
+  return (
+    <Shell>
+      <PageHeader eyebrow="Factory OpenCode definitions" title="Agents" />
+      <QueryState loading={q.isLoading} error={q.error} hasData={(q.data?.agents.length ?? 0) > 0}>
+        <section className="agent-grid">
+          {q.data?.agents.map(agent => (
+            <article key={agent.name}>
+              <i>◇</i>
+              <h2>{agent.name}</h2>
+              <p>{agent.description ?? "Description not available."}</p>
+              <dl>
+                <dt>Role</dt><dd>{agent.role}</dd>
+                <dt>Runtime</dt><dd>Unknown</dd>
+                <dt>Model</dt><dd>Unknown</dd>
+                <dt>Permissions</dt>
+                <dd>{agent.canEdit === undefined ? "Unknown" : agent.canEdit ? "Can edit" : "Read-only"}</dd>
+              </dl>
+            </article>
+          ))}
+        </section>
+      </QueryState>
+      {!q.isLoading && !q.error && !q.data?.agents.length && (
+        <Empty text="No agent definitions found in agents/opencode." />
+      )}
+    </Shell>
+  );
+}
+
+function EventsPage() {
+  const events = useOffice(s => s.events);
+  return (
+    <Shell>
+      <PageHeader eyebrow="Server-sent events" title="Recent events" />
+      <Panel title="Live event stream">
+        {events.length ? (
+          <div className="event-table">
+            {events.map(e => (
+              <div className="event-row" key={e.id}>
+                <span className={`dot ${e.severity}`} />
+                <span className="event-type">{e.type}</span>
+                <span className="event-meta">
+                  {[e.pipelineId, e.projectId, e.taskId].filter(Boolean).join(" · ") || "—"}
+                </span>
+                <small>{formatTime(e.occurredAt)}</small>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty text="No events yet. Changes to pipelines or tasks will appear here." />
+        )}
+      </Panel>
+    </Shell>
+  );
+}
+
+function DiagnosticsPage() {
+  const diagnostics = useQuery({ queryKey: ["diagnostics"], queryFn: () => get<{ diagnostics: DiagnosticRecord[] }>("/api/diagnostics") });
+  const hermes = useQuery({ queryKey: ["hermes"], queryFn: () => get<{ hermes: HermesStatus }>("/api/hermes/status") });
+
+  return (
+    <Shell>
+      <PageHeader eyebrow="Adapter warnings & Hermes" title="Diagnostics" />
+      <section className="stats">
+        <Stat label="Hermes" value={hermes.data?.hermes.available ? "Connected" : "Inactive"} hint={hermes.data?.hermes.summary} />
+        <Stat label="Warnings" value={diagnostics.data?.diagnostics.length ?? "—"} />
+      </section>
+      <Panel title="Factory diagnostics">
+        <QueryState loading={diagnostics.isLoading} error={diagnostics.error} hasData={(diagnostics.data?.diagnostics.length ?? 0) > 0}>
+          <div className="rows">
+            {diagnostics.data?.diagnostics.map((d, index) => (
+              <div className="row stack" key={`${d.source}-${index}`}>
+                <span>
+                  <b>{d.source}</b>
+                  <small>{d.message}</small>
+                </span>
+                <small>{formatTime(d.occurredAt)}</small>
+              </div>
+            ))}
+          </div>
+        </QueryState>
+        {!diagnostics.isLoading && !diagnostics.error && !diagnostics.data?.diagnostics.length && (
+          <Empty text="No diagnostics reported. Malformed JSON and parse issues will appear here." />
+        )}
+      </Panel>
+    </Shell>
+  );
+}
+
+function VisualQaPage() {
+  const q = useQuery({ queryKey: ["visual-qa"], queryFn: () => get<{ visualQa: VisualQaStatus }>("/api/visual-qa/status") });
+  const status = q.data?.visualQa;
+
+  return (
+    <Shell>
+      <PageHeader eyebrow="Playwright interface stub" title="Visual QA" badge="not available" />
+      <QueryState loading={q.isLoading} error={q.error} hasData={Boolean(status)}>
+        {status && (
+          <>
+            <section className="stats">
+              <Stat label="Status" value="Not available" />
+              <Stat label="Artifacts" value={status.artifacts.length} />
+            </section>
+            <Panel title="Phase 1 placeholder">
+              <p className="prose">{status.message}</p>
+              {status.artifacts.length === 0 && (
+                <Empty text="No Visual QA artifacts are available in Phase 1." />
+              )}
+            </Panel>
+          </>
+        )}
+      </QueryState>
+    </Shell>
+  );
+}
+
+export {
+  Dashboard,
+  ProjectsPage,
+  ProjectPage,
+  TaskPage,
+  PipelinesPage,
+  PipelinePage,
+  AgentsPage,
+  EventsPage,
+  DiagnosticsPage,
+  VisualQaPage
+};
