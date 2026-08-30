@@ -335,6 +335,15 @@ export class MissionOrchestrator {
     await this.config.missionState.addDelegation(rebuildDelegation);
     await this.config.missionState.startDelegation(rebuildDelegation.id, "");
 
+    this.publisher.publish({
+      missionId: rebuildDelegation.missionId,
+      type: MissionEventTypes.DELEGATION_STARTED,
+      payload: {
+        delegationId: rebuildDelegation.id,
+        title: rebuildDelegation.title,
+      },
+    });
+
     let agentResult: AgentResult;
     try {
       const adapterResult = await this.config.factoryAdapter.runDelegation(
@@ -368,6 +377,17 @@ export class MissionOrchestrator {
       agentResult.output,
       agentResult.error
     );
+
+    this.publisher.publish({
+      missionId: rebuildDelegation.missionId,
+      type: MissionEventTypes.DELEGATION_COMPLETED,
+      payload: {
+        delegationId: rebuildDelegation.id,
+        title: rebuildDelegation.title,
+        status: finalStatus,
+        pipelineId: agentResult.pipelineId,
+      },
+    });
 
     return agentResult;
   }
