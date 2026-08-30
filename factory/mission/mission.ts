@@ -65,6 +65,20 @@ export const VisualQaResultSchema = z.object({
 });
 export type VisualQaResult = z.infer<typeof VisualQaResultSchema>;
 
+export const VisualQaEvidenceSchema = z.object({
+  status: z.enum(["passed", "failed", "skipped"]),
+  passed: z.boolean(),
+  totalChecks: z.number().int().nonnegative(),
+  passedChecks: z.number().int().nonnegative(),
+  failedChecks: z.number().int().nonnegative(),
+  errorCount: z.number().int().nonnegative(),
+  artifactCount: z.number().int().nonnegative(),
+  artifacts: z.array(z.object({ id: z.string(), type: z.string(), label: z.string() })),
+  startedAt: z.string(),
+  finishedAt: z.string(),
+});
+export type VisualQaEvidence = z.infer<typeof VisualQaEvidenceSchema>;
+
 export const MissionSchema = z.object({
   id: z.string(),
   goal: z.string().min(1),
@@ -76,6 +90,7 @@ export const MissionSchema = z.object({
   planId: z.string().optional(),
   currentDelegationIndex: z.number().int().nonnegative().default(0),
   visualQa: VisualQaResultSchema.optional(),
+  visualQaEvidence: VisualQaEvidenceSchema.optional(),
 });
 export type Mission = z.infer<typeof MissionSchema>;
 

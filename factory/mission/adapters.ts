@@ -581,17 +581,47 @@ export class CodingMissionAuditor implements Auditor {
     if (!mission.context?.requiresVisualQa) {
       return { passed: true, evidence: "Visual QA not required for this mission" };
     }
+
+    const evidence = mission.visualQaEvidence;
     const qa = mission.visualQa;
-    if (!qa) {
+
+    if (!evidence && !qa) {
       return { passed: false, evidence: "Visual QA result not available" };
     }
-    if (qa.status === "skipped") {
-      return { passed: true, evidence: "Visual QA was skipped (no adapter configured or build failed)" };
+
+    if (evidence) {
+      if (evidence.status === "skipped") {
+        return { passed: false, evidence: "Visual QA was skipped because build failed or no adapter configured" };
+      }
+      if (evidence.status === "failed") {
+        const parts: string[] = [];
+        if (evidence.failedChecks > 0) parts.push(`${evidence.failedChecks} checks failed`);
+        if (evidence.errorCount > 0) parts.push(`completed with ${evidence.errorCount} runtime errors`);
+        if (parts.length === 0) parts.push("status was failed");
+        return { passed: false, evidence: `Visual QA failed: ${parts.join(" and ")}` };
+      }
+      if (evidence.failedChecks > 0) {
+        return { passed: false, evidence: `Visual QA passed with ${evidence.failedChecks} failed checks` };
+      }
+      if (evidence.errorCount > 0) {
+        return { passed: false, evidence: "Visual QA completed with runtime errors" };
+      }
+      return { passed: true, evidence: "Visual QA passed with 0 failed checks" };
     }
-    if (qa.passed) {
-      return { passed: true, evidence: `Visual QA passed: ${qa.checks} checks, ${qa.failedChecks} failures` };
+
+    if (qa!.status === "skipped") {
+      return { passed: false, evidence: "Visual QA was skipped because build failed or no adapter configured" };
     }
-    return { passed: false, evidence: `Visual QA failed: ${qa.failedChecks} check failures out of ${qa.checks}` };
+    if (!qa!.passed) {
+      return { passed: false, evidence: `Visual QA failed: ${qa!.failedChecks} checks failed` };
+    }
+    if (qa!.failedChecks > 0) {
+      return { passed: false, evidence: `Visual QA passed with ${qa!.failedChecks} failed checks` };
+    }
+    if (qa!.errors.length > 0) {
+      return { passed: false, evidence: "Visual QA completed with runtime errors" };
+    }
+    return { passed: true, evidence: "Visual QA passed with 0 failed checks" };
   }
 
   private evaluateGenericKeyword(criterion: string, result: AgentResult, keywords: string[]): { passed: boolean; evidence: string } {

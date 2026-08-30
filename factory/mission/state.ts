@@ -18,7 +18,9 @@ import {
   DelegationStatus,
   VisualQaResult,
   VisualQaResultSchema,
+  VisualQaEvidence,
 } from "./mission.js";
+import { normalizeVisualQaEvidence } from "./visual-qa-evidence.js";
 
 export interface MissionSnapshot {
   mission: Mission;
@@ -192,10 +194,16 @@ export class MissionState {
         if (payload.visualQa) {
           this.mission.visualQa = payload.visualQa as VisualQaResult;
         }
+        if (payload.visualQaEvidence) {
+          this.mission.visualQaEvidence = payload.visualQaEvidence as VisualQaEvidence;
+        }
         break;
       case "mission.visual_qa.skipped":
         if (payload.visualQa) {
           this.mission.visualQa = payload.visualQa as VisualQaResult;
+        }
+        if (payload.visualQaEvidence) {
+          this.mission.visualQaEvidence = payload.visualQaEvidence as VisualQaEvidence;
         }
         break;
     }
@@ -271,6 +279,10 @@ export class MissionState {
 
   getVisualQaResult(): VisualQaResult | undefined {
     return this.mission.visualQa ? { ...this.mission.visualQa } : undefined;
+  }
+
+  getVisualQaEvidence(): VisualQaEvidence | undefined {
+    return this.mission.visualQaEvidence ? { ...this.mission.visualQaEvidence } : undefined;
   }
 
   async setMission(mission: Mission): Promise<void> {
@@ -351,12 +363,13 @@ export class MissionState {
 
   async recordVisualQaResult(visualQa: VisualQaResult): Promise<void> {
     this.mission.visualQa = { ...visualQa };
+    this.mission.visualQaEvidence = normalizeVisualQaEvidence(visualQa);
     const eventType = visualQa.status === "passed"
       ? "mission.visual_qa.completed"
       : visualQa.status === "skipped"
         ? "mission.visual_qa.skipped"
         : "mission.visual_qa.failed";
-    await this.appendEvent({ missionId: this.missionId, type: eventType, payload: { visualQa } });
+    await this.appendEvent({ missionId: this.missionId, type: eventType, payload: { visualQa, visualQaEvidence: this.mission.visualQaEvidence } });
   }
 
   async updateDelegationIndex(index: number): Promise<void> {

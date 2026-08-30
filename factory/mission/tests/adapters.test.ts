@@ -380,6 +380,7 @@ describe("successful coding mission", () => {
     const mission = makeMission();
     const planner = createPlanner();
     const plan = planner.decompose(mission);
+    mission.context!.requiresVisualQa = false;
 
     const state = new MissionState(tmpDir, mission.id);
     await state.init();
@@ -541,6 +542,7 @@ describe("mission completion", () => {
     const mission = makeMission();
     const planner = createPlanner();
     const plan = planner.decompose(mission);
+    mission.context!.requiresVisualQa = false;
 
     const state = new MissionState(tmpDir, mission.id);
     await state.init();

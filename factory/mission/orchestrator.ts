@@ -13,6 +13,7 @@ import {
   AcceptanceCriteriaResult,
   VisualQaResult,
 } from "./mission.js";
+import { normalizeVisualQaEvidence } from "./visual-qa-evidence.js";
 import { MissionState } from "./state.js";
 import { MissionEventSink } from "./mission.js";
 import { MissionEventPublisher, createMissionEventPublisher, MissionEventTypes } from "./events.js";
@@ -200,7 +201,16 @@ export class MissionOrchestrator {
       this.publisher.publish({
         missionId: buildDelegation.missionId,
         type: MissionEventTypes.MISSION_VISUAL_QA_SKIPPED,
-        payload: { reason: "No Visual QA adapter configured" },
+        payload: {
+          reason: "No Visual QA adapter configured",
+          status: "skipped",
+          passed: false,
+          totalChecks: 0,
+          passedChecks: 0,
+          failedChecks: 0,
+          errorCount: 0,
+          artifactCount: 0,
+        },
       });
       // Refresh current mission from state
       this.currentMission = this.config.missionState.getMission();
@@ -228,6 +238,8 @@ export class MissionOrchestrator {
     // Refresh current mission from state so auditor sees the QA result
     this.currentMission = this.config.missionState.getMission();
 
+    const evidence = normalizeVisualQaEvidence(result);
+
     const eventType = result.status === "passed"
       ? MissionEventTypes.MISSION_VISUAL_QA_COMPLETED
       : MissionEventTypes.MISSION_VISUAL_QA_FAILED;
@@ -236,12 +248,13 @@ export class MissionOrchestrator {
       missionId: buildDelegation.missionId,
       type: eventType,
       payload: {
-        status: result.status,
-        passed: result.passed,
-        checks: result.checks,
-        failedChecks: result.failedChecks,
-        errors: result.errors,
-        artifactCount: result.artifacts.length,
+        status: evidence.status,
+        passed: evidence.passed,
+        totalChecks: evidence.totalChecks,
+        passedChecks: evidence.passedChecks,
+        failedChecks: evidence.failedChecks,
+        errorCount: evidence.errorCount,
+        artifactCount: evidence.artifactCount,
         runId: result.runId,
       },
     });

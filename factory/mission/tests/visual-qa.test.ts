@@ -730,7 +730,7 @@ describe("Auditor PASS requires successful QA", () => {
 // ─── 9. Auditor handling of QA scenarios ──────────────────────────────
 
 describe("Auditor handling of QA scenarios", () => {
-  it("passes when Visual QA was skipped (no adapter configured)", async () => {
+  it("fails when Visual QA was skipped (no adapter configured)", async () => {
     const auditor = new CodingMissionAuditor();
     const delegation = createDelegation("m1", "obj1", "Build Project", "desc", "engineering", {
       acceptanceCriteria: ["Build succeeded", "Visual QA passed"],
@@ -759,7 +759,7 @@ describe("Auditor handling of QA scenarios", () => {
     const plan = planner.decompose(mission);
 
     const audit = await auditor.audit(delegation, result, mission, plan);
-    expect(audit.status).toBe("PASS");
+    expect(audit.status).toBe("FAIL");
   });
 
   it("fails when Visual QA result not available", async () => {
