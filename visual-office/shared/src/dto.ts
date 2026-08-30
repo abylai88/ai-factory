@@ -59,10 +59,56 @@ export const DiagnosticRecordSchema = z.object({
 });
 export type DiagnosticRecord = z.infer<typeof DiagnosticRecordSchema>;
 
-export const VisualQaStatusSchema = z.object({
-  status: z.literal("not_available"),
+export const VisualQaCheckSchema = z.object({
+  name: z.string(),
+  viewport: z.string(),
+  status: z.enum(["passed", "failed", "skipped"]),
+  durationMs: z.number().nonnegative(),
+  message: z.string().optional()
+});
+export type VisualQaCheck = z.infer<typeof VisualQaCheckSchema>;
+
+export const VisualQaErrorSchema = z.object({
+  type: z.enum(["console", "page", "request", "launch", "assertion"]),
   message: z.string(),
-  artifacts: z.array(ArtifactSchema)
+  viewport: z.string().optional(),
+  url: z.string().optional()
+});
+export type VisualQaError = z.infer<typeof VisualQaErrorSchema>;
+
+export const VisualQaRunSchema = z.object({
+  runId: z.string(),
+  projectId: z.string(),
+  scenario: z.string(),
+  status: z.enum(["queued", "running", "passed", "failed", "error"]),
+  startedAt: z.string(),
+  finishedAt: z.string().optional(),
+  viewports: z.array(z.string()),
+  checks: z.array(VisualQaCheckSchema),
+  artifacts: z.array(ArtifactSchema),
+  errors: z.array(VisualQaErrorSchema),
+  failureSummary: z.string().optional()
+});
+export type VisualQaRun = z.infer<typeof VisualQaRunSchema>;
+
+export const VisualQaRunRequestSchema = z.object({
+  projectId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
+  scenario: z.string().regex(/^[a-z0-9-]{1,32}$/).optional(),
+  viewports: z.array(z.string().regex(/^\d{3,5}x\d{3,5}$/)).max(8).optional(),
+  traceOnFailure: z.boolean().optional()
+}).strict();
+export type VisualQaRunRequest = z.infer<typeof VisualQaRunRequestSchema>;
+
+export const VisualQaStatusSchema = z.object({
+  available: z.boolean(),
+  message: z.string(),
+  supportedProjects: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    scenarios: z.array(z.string())
+  })),
+  defaultViewports: z.array(z.string()),
+  lastRun: VisualQaRunSchema.optional()
 });
 export type VisualQaStatus = z.infer<typeof VisualQaStatusSchema>;
 

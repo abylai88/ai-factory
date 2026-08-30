@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import type {
   AgentDescriptor,
@@ -8,9 +9,11 @@ import type {
   PipelineSnapshot,
   ProjectSnapshot,
   TaskSnapshot,
-  VisualQaStatus
+  VisualQaStatus,
+  VisualQaRun,
+  VisualQaCheck
 } from "@shared";
-import { get } from "./api.js";
+import { get, post } from "./api.js";
 import {
   Badge,
   Empty,
@@ -42,7 +45,7 @@ function Dashboard() {
         <Stat label="Failed pipelines" value={pipelines.isLoading ? "—" : failed.length} />
         <Stat label="Projects" value={projects.data?.projects.length ?? "—"} />
         <Stat label="Agents" value={agents.data?.agents.length ?? "—"} />
-        <Stat label="Visual QA" value="Not available" hint={visualQa.data?.visualQa.message ?? "Phase 1 interface"} />
+        <Stat label="Visual QA" value={visualQa.data?.visualQa.available ? "Ready" : "Unavailable"} hint={visualQa.data?.visualQa.lastRun?.status ?? "Playwright smoke"} />
       </section>
 
       <section className="grid two">
@@ -456,25 +459,149 @@ function DiagnosticsPage() {
 }
 
 function VisualQaPage() {
-  const q = useQuery({ queryKey: ["visual-qa"], queryFn: () => get<{ visualQa: VisualQaStatus }>("/api/visual-qa/status") });
-  const status = q.data?.visualQa;
+  const statusQuery = useQuery({ queryKey: ["visual-qa"], queryFn: () => get<{ visualQa: VisualQaStatus }>("/api/visual-qa/status"), refetchInterval: 3_000 });
+  const [activeRunId, setActiveRunId] = useState<string | undefined>(statusQuery.data?.visualQa.lastRun?.runId);
+  const [projectId, setProjectId] = useState("traffic-dodge");
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  const runQuery = useQuery({
+    queryKey: ["visual-qa-run", activeRunId],
+    queryFn: () => get<{ run: VisualQaRun }>(`/api/visual-qa/runs/${encodeURIComponent(activeRunId!)}`),
+    enabled: Boolean(activeRunId),
+    refetchInterval: query => {
+      const status = query.state.data?.run.status;
+      return status === "queued" || status === "running" ? 2_000 : false;
+    }
+  });
+
+  const status = statusQuery.data?.visualQa;
+  const run = runQuery.data?.run ?? status?.lastRun;
+  const viewports = status?.defaultViewports ?? ["1280x720", "1366x768", "1920x1080"];
+
+  const startRun = async () => {
+    setRunError(null);
+    setRunning(true);
+    try {
+      const { run: created } = await post<{ run: VisualQaRun }>("/api/visual-qa/runs", { projectId, scenario: "smoke" });
+      setActiveRunId(created.runId);
+    } catch (error) {
+      setRunError(error instanceof Error ? error.message : "Failed to start Visual QA");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const checksByViewport = new Map<string, VisualQaCheck[]>();
+  for (const viewport of viewports) checksByViewport.set(viewport, []);
+  for (const check of run?.checks ?? []) {
+    checksByViewport.get(check.viewport)?.push(check);
+  }
+
+  const viewportPassed = (viewport: string) => {
+    const checks = checksByViewport.get(viewport) ?? [];
+    if (!checks.length) return run?.status === "running" || run?.status === "queued" ? "running" : "unknown";
+    return checks.some(c => c.status === "failed") ? "failed" : checks.every(c => c.status === "passed") ? "passed" : "running";
+  };
 
   return (
     <Shell>
-      <PageHeader eyebrow="Playwright interface stub" title="Visual QA" badge="not available" />
-      <QueryState loading={q.isLoading} error={q.error} hasData={Boolean(status)}>
+      <PageHeader eyebrow="Playwright browser QA" title="Visual QA" badge={status?.available ? "ready" : "unavailable"} />
+      <QueryState loading={statusQuery.isLoading} error={statusQuery.error} hasData={Boolean(status)}>
         {status && (
           <>
             <section className="stats">
-              <Stat label="Status" value="Not available" />
-              <Stat label="Artifacts" value={status.artifacts.length} />
+              <Stat label="Service" value={status.available ? "Ready" : "Unavailable"} />
+              <Stat label="Last run" value={run?.status ?? "None"} />
+              <Stat label="Project" value={projectId} />
+              <Stat label="Checks" value={run ? `${run.checks.filter(c => c.status === "passed").length}/${run.checks.length || "—"}` : "—"} />
             </section>
-            <Panel title="Phase 1 placeholder">
+
+            <Panel title="Run Visual QA">
+              <div className="qa-controls">
+                <label>
+                  Project
+                  <select value={projectId} onChange={e => setProjectId(e.target.value)}>
+                    {status.supportedProjects.map(project => (
+                      <option key={project.id} value={project.id}>{project.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <button className="primary-btn" onClick={() => void startRun()} disabled={running || run?.status === "running" || run?.status === "queued"}>
+                  {running ? "Starting…" : "Run Visual QA"}
+                </button>
+              </div>
+              {runError && <div className="state error">{runError}</div>}
               <p className="prose">{status.message}</p>
-              {status.artifacts.length === 0 && (
-                <Empty text="No Visual QA artifacts are available in Phase 1." />
-              )}
             </Panel>
+
+            <Panel title="Viewport matrix">
+              <div className="viewport-grid">
+                {viewports.map(viewport => {
+                  const result = viewportPassed(viewport);
+                  const screenshot = run?.artifacts.find(a => a.type === "screenshot" && a.label.startsWith(`${viewport}/`));
+                  return (
+                    <article key={viewport} className="viewport-card">
+                      <div className="viewport-card-head">
+                        <strong>{viewport}</strong>
+                        <Badge value={result} />
+                      </div>
+                      {screenshot && (
+                        <a href={`/api/artifacts/${screenshot.id}`} target="_blank" rel="noreferrer">
+                          <img className="qa-shot" src={`/api/artifacts/${screenshot.id}`} alt={`${viewport} screenshot`} />
+                        </a>
+                      )}
+                      <div className="check-list">
+                        {(checksByViewport.get(viewport) ?? []).map(check => (
+                          <div key={`${viewport}-${check.name}`} className="check-row">
+                            <span className={`dot ${check.status === "passed" ? "info" : "error"}`} />
+                            <span>{check.name}</span>
+                            <small>{check.message}</small>
+                          </div>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </Panel>
+
+            {run && (
+              <>
+                {run.failureSummary && (
+                  <Panel title="Failure summary">
+                    <div className="state error">{run.failureSummary}</div>
+                  </Panel>
+                )}
+
+                {run.errors.length > 0 && (
+                  <Panel title="Errors">
+                    <div className="rows">
+                      {run.errors.map((error, index) => (
+                        <div className="row stack" key={`${error.type}-${index}`}>
+                          <span><b>{error.type}</b><small>{error.viewport ? `${error.viewport} · ` : ""}{error.message}</small></span>
+                        </div>
+                      ))}
+                    </div>
+                  </Panel>
+                )}
+
+                <Panel title="Artifacts">
+                  {run.artifacts.length ? (
+                    <div className="rows">
+                      {run.artifacts.map(artifact => (
+                        <a className="row" href={`/api/artifacts/${artifact.id}`} target="_blank" rel="noreferrer" key={artifact.id}>
+                          <span><b>{artifact.label}</b><small>{artifact.type} · {artifact.id}</small></span>
+                          <Badge value={artifact.available ? "available" : "unknown"} />
+                        </a>
+                      ))}
+                    </div>
+                  ) : (
+                    <Empty text="Artifacts will appear when the run completes." />
+                  )}
+                </Panel>
+              </>
+            )}
           </>
         )}
       </QueryState>

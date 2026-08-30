@@ -7,9 +7,10 @@ import { FactoryAdapter } from "./factory-adapter.js";
 import { EventBus } from "./events.js";
 import { FactoryMonitor } from "./monitor.js";
 import { NullInfrastructureAgent } from "./infrastructure-agent.js";
-import { StubVisualQAService } from "../../visual-qa/src/service.js";
+import { PlaywrightVisualQAService } from "../../visual-qa/src/service.js";
+import { VisualQaRunRequestSchema } from "../../shared/src/index.js";
 
-export interface AppOptions { factoryRoot?: string; startMonitor?: boolean; serveStatic?: boolean; }
+export interface AppOptions { factoryRoot?: string; startMonitor?: boolean; serveStatic?: boolean; visualQa?: PlaywrightVisualQAService; }
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(moduleDir, "../..");
@@ -21,7 +22,10 @@ export function createApp(options: AppOptions = {}) {
   const events = new EventBus();
   const monitor = new FactoryMonitor(adapter, events);
   const hermes = new NullInfrastructureAgent();
-  const visualQa = new StubVisualQAService();
+  const visualQa = options.visualQa ?? new PlaywrightVisualQAService({
+    factoryRoot,
+    publish: event => events.publish(event)
+  });
 
   app.register(cors, { origin: [/^http:\/\/127\.0\.0\.1(?::\d+)?$/, /^http:\/\/localhost(?::\d+)?$/] });
 
@@ -77,9 +81,32 @@ export function createApp(options: AppOptions = {}) {
     return { diagnostics: [...eventDiagnostics, ...adapterDiagnostics] };
   });
 
-  app.get("/api/visual-qa/status", async () => {
-    const result = await visualQa.run("status");
-    return { visualQa: { status: result.status, message: result.message, artifacts: result.artifacts } };
+  app.get("/api/visual-qa/status", async () => ({ visualQa: await visualQa.getStatus() }));
+
+  app.post("/api/visual-qa/runs", async (request, reply) => {
+    const parsed = VisualQaRunRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid Visual QA request", details: parsed.error.flatten() });
+    try {
+      const run = await visualQa.run(parsed.data);
+      return reply.code(202).send({ run });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to start Visual QA run" });
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/visual-qa/runs/:id", async (request, reply) => {
+    if (!/^run-[A-Za-z0-9-]+$/.test(request.params.id)) return reply.code(400).send({ error: "Invalid run id" });
+    const run = await visualQa.getResults(request.params.id);
+    return run ? { run } : reply.code(404).send({ error: "Run not found" });
+  });
+
+  app.get<{ Params: { id: string } }>("/api/artifacts/:id", async (request, reply) => {
+    const store = visualQa.getArtifactStore();
+    const resolved = await store.resolveArtifactPath(request.params.id);
+    if (!resolved) return reply.code(404).send({ error: "Artifact not found" });
+    const ext = path.extname(resolved.absolute).toLowerCase();
+    const type = ext === ".png" ? "image/png" : ext === ".zip" ? "application/zip" : ext === ".json" ? "application/json" : "application/octet-stream";
+    return reply.type(type).send(await import("node:fs/promises").then(fs => fs.readFile(resolved.absolute)));
   });
 
   app.get("/api/hermes/status", async () => {
@@ -114,7 +141,12 @@ export function createApp(options: AppOptions = {}) {
   }
 
   if (options.startMonitor !== false) {
-    app.addHook("onReady", async () => { await monitor.start(); });
+    app.addHook("onReady", async () => {
+      await visualQa.init();
+      await monitor.start();
+    });
+  } else {
+    app.addHook("onReady", async () => { await visualQa.init(); });
   }
   app.addHook("onClose", async () => monitor.stop());
 

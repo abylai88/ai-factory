@@ -1,0 +1,14 @@
+{
+  "id": "traffic-dodge",
+  "name": "Traffic Dodge",
+  "factoryRelativePath": "projects/traffic-dodge",
+  "launch": {
+    "type": "npm-dev",
+    "port": 9100,
+    "healthCheckPath": "/",
+    "command": "npm",
+    "args": ["run", "dev"]
+  },
+  "defaultScenario": "smoke",
+  "scenarios": ["smoke"]
+}

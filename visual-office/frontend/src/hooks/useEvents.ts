@@ -29,6 +29,11 @@ export function useEvents() {
           void queryClient.invalidateQueries({ queryKey: ["tasks", event.projectId] });
         }
       }
+      if (event.type.startsWith("visual_qa.")) {
+        void queryClient.invalidateQueries({ queryKey: ["visual-qa"] });
+        const runId = typeof event.payload.runId === "string" ? event.payload.runId : undefined;
+        if (runId) void queryClient.invalidateQueries({ queryKey: ["visual-qa-run", runId] });
+      }
     };
 
     const connect = () => {

@@ -4,5 +4,5 @@
     "esModuleInterop": true, "skipLibCheck": true, "jsx": "react-jsx", "types": ["node"], "noEmit": true,
     "baseUrl": ".", "paths": { "@shared": ["shared/src/index.ts"] }
   },
-  "include": ["backend/src", "frontend/src", "shared/src", "visual-qa/src", "tests"]
+  "include": ["backend/src", "frontend/src", "shared/src", "visual-qa/src", "visual-qa/tests", "tests"]
 }
