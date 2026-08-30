@@ -8,6 +8,7 @@ export const MissionStatusSchema = z.enum([
   "running",
   "auditing",
   "repairing",
+  "diagnosis-planned",
   "completed",
   "failed",
   "blocked",
@@ -33,6 +34,100 @@ export const MissionConstraintsSchema = z.object({
   requireApproval: z.boolean().default(false),
 });
 export type MissionConstraints = z.infer<typeof MissionConstraintsSchema>;
+
+// ─── Phase 9A: Diagnosis & RepairPlan ────────────────────────────────
+
+export const DiagnosisCategorySchema = z.enum([
+  "runtime-error",
+  "visual-regression",
+  "blank-canvas",
+  "asset-loading",
+  "build-output",
+  "layout",
+  "interaction",
+  "unknown",
+]);
+export type DiagnosisCategory = z.infer<typeof DiagnosisCategorySchema>;
+
+export const DiagnosisSeveritySchema = z.enum(["low", "medium", "high", "critical"]);
+export type DiagnosisSeverity = z.infer<typeof DiagnosisSeveritySchema>;
+
+export const DiagnosisConfidenceSchema = z.enum(["low", "medium", "high"]);
+export type DiagnosisConfidence = z.infer<typeof DiagnosisConfidenceSchema>;
+
+export const RepairSafetyScopeSchema = z.enum(["project", "delegation", "mission"]);
+export type RepairSafetyScope = z.infer<typeof RepairSafetyScopeSchema>;
+
+export const RepairActionSchema = z.object({
+  file: z.string().min(1),
+  operation: z.enum(["modify", "create", "delete", "replace"]),
+  reason: z.string().min(1),
+  expectedOutcome: z.string().min(1),
+  scope: RepairSafetyScopeSchema,
+});
+export type RepairAction = z.infer<typeof RepairActionSchema>;
+
+export const VerificationStepSchema = z.enum(["build", "visual-qa", "audit"]);
+export type VerificationStep = z.infer<typeof VerificationStepSchema>;
+
+export const VerificationPlanSchema = z.object({
+  steps: z.array(VerificationStepSchema).min(1),
+  description: z.string(),
+});
+export type VerificationPlan = z.infer<typeof VerificationPlanSchema>;
+
+export const DiagnosisInputSchema = z.object({
+  missionId: z.string().min(1),
+  projectId: z.string().min(1),
+  projectPath: z.string().min(1),
+  acceptanceCriteria: z.array(z.string()),
+  buildFailed: z.boolean(),
+  buildError: z.string().optional(),
+  runtimeErrors: z.array(z.string()),
+  visualQaStatus: z.enum(["passed", "failed", "skipped"]),
+  visualQaEvidence: z.any().optional(),
+  failedChecks: z.array(z.object({
+    name: z.string(),
+    viewport: z.string(),
+    message: z.string().optional(),
+  })),
+  artifactMetadata: z.array(z.object({
+    id: z.string(),
+    type: z.string(),
+    label: z.string(),
+  })),
+  affectedFiles: z.array(z.string()),
+});
+export type DiagnosisInput = z.infer<typeof DiagnosisInputSchema>;
+
+export const DiagnosisSchema = z.object({
+  id: z.string(),
+  missionId: z.string(),
+  projectId: z.string(),
+  category: DiagnosisCategorySchema,
+  severity: DiagnosisSeveritySchema,
+  confidence: DiagnosisConfidenceSchema,
+  summary: z.string(),
+  evidence: z.array(z.string()),
+  createdAt: z.string(),
+});
+export type Diagnosis = z.infer<typeof DiagnosisSchema>;
+
+export const DiagnosisRepairPlanSchema = z.object({
+  id: z.string(),
+  missionId: z.string(),
+  diagnosisId: z.string(),
+  summary: z.string(),
+  severity: DiagnosisSeveritySchema,
+  confidence: DiagnosisConfidenceSchema,
+  actions: z.array(RepairActionSchema),
+  verificationPlan: VerificationPlanSchema,
+  maxAttempts: z.number().int().positive().default(3),
+  allowedProjectId: z.string(),
+  protectedPaths: z.array(z.string()),
+  createdAt: z.string(),
+});
+export type DiagnosisRepairPlan = z.infer<typeof DiagnosisRepairPlanSchema>;
 
 // ─── Phase 8A: Visual QA ─────────────────────────────────────────────
 
@@ -91,6 +186,8 @@ export const MissionSchema = z.object({
   currentDelegationIndex: z.number().int().nonnegative().default(0),
   visualQa: VisualQaResultSchema.optional(),
   visualQaEvidence: VisualQaEvidenceSchema.optional(),
+  diagnosis: DiagnosisSchema.optional(),
+  diagnosisRepairPlan: DiagnosisRepairPlanSchema.optional(),
 });
 export type Mission = z.infer<typeof MissionSchema>;
 
@@ -221,6 +318,8 @@ export const MissionEventSchema = z.object({
     "mission.visual_qa.completed",
     "mission.visual_qa.failed",
     "mission.visual_qa.skipped",
+    "mission.diagnosis.started",
+    "mission.diagnosis.completed",
   ]),
   payload: z.record(z.string(), z.unknown()),
 });
@@ -357,5 +456,56 @@ export function createRepairPlan(delegationId: string, description: string, focu
     focusAreas,
     maxIterations,
     iteration: 0,
+  };
+}
+
+export const PROTECTED_PATHS = ["factory/**", "agents/**", "visual-office/**"] as const;
+
+export function createDiagnosis(
+  missionId: string,
+  projectId: string,
+  category: DiagnosisCategory,
+  severity: DiagnosisSeverity,
+  confidence: DiagnosisConfidence,
+  summary: string,
+  evidence: string[]
+): Diagnosis {
+  return {
+    id: `diag-${randomUUID().slice(0, 8)}`,
+    missionId,
+    projectId,
+    category,
+    severity,
+    confidence,
+    summary,
+    evidence,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export function createDiagnosisRepairPlan(
+  missionId: string,
+  diagnosisId: string,
+  summary: string,
+  severity: DiagnosisSeverity,
+  confidence: DiagnosisConfidence,
+  actions: RepairAction[],
+  verificationPlan: VerificationPlan,
+  maxAttempts: number,
+  projectId: string
+): DiagnosisRepairPlan {
+  return {
+    id: `rp-${randomUUID().slice(0, 8)}`,
+    missionId,
+    diagnosisId,
+    summary,
+    severity,
+    confidence,
+    actions,
+    verificationPlan,
+    maxAttempts,
+    allowedProjectId: projectId,
+    protectedPaths: [...PROTECTED_PATHS],
+    createdAt: new Date().toISOString(),
   };
 }

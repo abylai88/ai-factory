@@ -19,6 +19,9 @@ import { classifyGoal, detectEngine } from "../engine/engine.js";
 import { TemplateManager } from "../setup/project-setup.js";
 import { ProjectProvisioner } from "./project-provisioner.js";
 import { MissionProjectManager, MissionAwareFactoryAdapter } from "./mission-project-manager.js";
+import { classifyDiagnosis, generateRepairPlan } from "./diagnosis.js";
+import { auditRepairPlan, isRepairPlanSafe } from "./repair-plan-audit.js";
+import type { DiagnosisInput } from "./mission.js";
 
 const ALLOWED_TEMPLATES = ["yagames-phaser-template"] as const;
 
@@ -35,6 +38,7 @@ function parseArgs(argv: string[]): {
   force: boolean;
   fromStep?: string;
   listTemplates: boolean;
+  missionId?: string;
 } {
   const args = [...argv];
   const command = args.shift() ?? "";
@@ -50,6 +54,7 @@ function parseArgs(argv: string[]): {
   let force = false;
   let fromStep: string | undefined;
   let listTemplates = false;
+  let missionId: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -74,6 +79,8 @@ function parseArgs(argv: string[]): {
       force = true;
     } else if (a === "--from-step") {
       fromStep = args[++i];
+    } else if (a === "--mission-id") {
+      missionId = args[++i];
     } else if (a.startsWith("--")) {
     } else {
       positional.push(a);
@@ -93,6 +100,7 @@ function parseArgs(argv: string[]): {
     force,
     fromStep,
     listTemplates,
+    missionId,
   };
 }
 
@@ -103,6 +111,7 @@ function printUsage(): void {
 Usage:
   npx tsx factory/mission/index.ts run "Goal" [options]
   npm run mission -- run "Goal" [options]
+  npm run mission -- diagnose <mission-id>
   npm run mission -- list-templates
 
 Options:
@@ -116,12 +125,14 @@ Options:
   --read-only           Execute read-only investigation (no file modifications)
   --force               Replace existing workspace (DESTROYS content)
   --from-step <id>      Resume pipeline from this step ID
+  --mission-id <id>     Mission ID for diagnose command
 
 Examples:
   npm run mission -- run "Build a platformer game"
   npm run mission -- run "Fix TypeScript errors" --dry-run
   npm run mission -- run "Add new level" --project-id traffic-dodge
   npm run mission -- run "Inspect project architecture" --read-only --project-id traffic-dodge
+  npm run mission -- diagnose mission-abc12345
   npm run mission -- list-templates
 `);
 }
@@ -184,7 +195,7 @@ async function setupWorkspace(
 }
 
 async function main(): Promise<void> {
-  const { command, goal, project, projectId, template, dryRun, readOnly, maxRepairs, engine, force, fromStep, listTemplates } = parseArgs(process.argv.slice(2));
+  const { command, goal, project, projectId, template, dryRun, readOnly, maxRepairs, engine, force, fromStep, listTemplates, missionId } = parseArgs(process.argv.slice(2));
 
   if (command === "list-templates" || listTemplates) {
     const baseDir = path.resolve(process.env.AI_FACTORY_HOME ?? process.cwd());
@@ -200,6 +211,120 @@ async function main(): Promise<void> {
       const status = t.exists ? "✅" : "❌ missing";
       console.log(`  ${t.id} — ${status}`);
     }
+    return;
+  }
+
+  if (command === "diagnose") {
+    const baseDir = path.resolve(process.env.AI_FACTORY_HOME ?? process.cwd());
+    const mid = goal || missionId;
+    if (!mid) {
+      console.error("Usage: npm run mission -- diagnose <mission-id>");
+      process.exitCode = 1;
+      return;
+    }
+
+    const state = new MissionState(baseDir, mid);
+    await state.init();
+    const mission = state.getMission();
+
+    if (!mission.id || mission.status === "draft") {
+      console.error(`Mission ${mid} not found or not yet executed.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const visualQa = state.getVisualQaResult();
+    if (!visualQa) {
+      console.error(`Mission ${mid} has no Visual QA result. Cannot diagnose.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const delegations = state.getDelegations();
+    const buildDelegation = delegations.find(
+      (d) => d.description.includes("ROLE: builder") || d.description.includes("BUILD_COMMAND:")
+    );
+    const buildFailed = buildDelegation?.status === "failed";
+    const buildError = buildDelegation?.error;
+
+    const failedChecks = (visualQa.checkDetails ?? [])
+      .filter((c) => c.status === "failed")
+      .map((c) => ({ name: c.name, viewport: c.viewport, message: c.message }));
+
+    const affectedFiles = [...new Set(
+      delegations
+        .filter((d) => d.status === "passed" || d.status === "failed")
+        .flatMap((d) => {
+          const files: string[] = [];
+          const match = d.description.match(/FILE: (.+)/);
+          if (match) files.push(match[1].trim());
+          return files;
+        })
+    )];
+
+    const input: DiagnosisInput = {
+      missionId: mission.id,
+      projectId: mission.context?.projectId ?? "unknown",
+      projectPath: mission.context?.workspace ?? "unknown",
+      acceptanceCriteria: delegations.flatMap((d) => d.acceptanceCriteria),
+      buildFailed,
+      buildError: buildError ?? undefined,
+      runtimeErrors: visualQa.errors,
+      visualQaStatus: visualQa.status,
+      visualQaEvidence: state.getVisualQaEvidence(),
+      failedChecks,
+      artifactMetadata: visualQa.artifacts.map((a) => ({ id: a.id, type: a.type, label: a.label })),
+      affectedFiles,
+    };
+
+    await state.recordDiagnosisStarted();
+
+    const diagnosis = classifyDiagnosis(input);
+    const repairPlan = generateRepairPlan(input, diagnosis, mission.constraints?.maxRepairs ?? 3);
+
+    const violations = auditRepairPlan(repairPlan);
+    if (violations.length > 0) {
+      console.error("\n❌ RepairPlan safety audit failed:");
+      for (const v of violations) {
+        console.error(`  [${v.rule}] ${v.message}`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    await state.recordDiagnosisCompleted(diagnosis, repairPlan);
+
+    console.log("\n╔══════════════════════════════════════╗");
+    console.log("║     🔍 DIAGNOSIS REPORT             ║");
+    console.log("╚══════════════════════════════════════╝");
+    console.log(`Mission: ${mission.id}`);
+    console.log(`Category: ${diagnosis.category}`);
+    console.log(`Severity: ${diagnosis.severity}`);
+    console.log(`Confidence: ${diagnosis.confidence}`);
+    console.log(`Summary: ${diagnosis.summary}`);
+    if (diagnosis.evidence.length > 0) {
+      console.log("\nEvidence:");
+      for (const e of diagnosis.evidence) {
+        console.log(`  - ${e}`);
+      }
+    }
+
+    console.log("\n📋 REPAIR PLAN:");
+    console.log(`Plan ID: ${repairPlan.id}`);
+    console.log(`Max Attempts: ${repairPlan.maxAttempts}`);
+    console.log(`Actions: ${repairPlan.actions.length}`);
+    for (const action of repairPlan.actions) {
+      console.log(`\n  [${action.operation}] ${action.file}`);
+      console.log(`    Reason: ${action.reason}`);
+      console.log(`    Expected: ${action.expectedOutcome}`);
+      console.log(`    Scope: ${action.scope}`);
+    }
+
+    console.log("\n✅ Verification Plan:");
+    console.log(`  Steps: ${repairPlan.verificationPlan.steps.join(" → ")}`);
+    console.log(`  ${repairPlan.verificationPlan.description}`);
+
+    console.log("\n🔒 Safety: PASS (no violations)");
     return;
   }
 

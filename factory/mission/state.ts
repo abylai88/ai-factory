@@ -19,6 +19,10 @@ import {
   VisualQaResult,
   VisualQaResultSchema,
   VisualQaEvidence,
+  Diagnosis,
+  DiagnosisSchema,
+  DiagnosisRepairPlan,
+  DiagnosisRepairPlanSchema,
 } from "./mission.js";
 import { normalizeVisualQaEvidence } from "./visual-qa-evidence.js";
 
@@ -29,6 +33,8 @@ export interface MissionSnapshot {
   auditResults: Record<string, AuditResult>;
   repairPlans: Record<string, RepairPlan>;
   currentDelegationIndex: number;
+  diagnosis: Diagnosis | null;
+  diagnosisRepairPlan: DiagnosisRepairPlan | null;
   updatedAt: string;
 }
 
@@ -47,6 +53,8 @@ const SNAPSHOT_SCHEMA = z.object({
   auditResults: z.record(z.string(), AuditResultSchema),
   repairPlans: z.record(z.string(), RepairPlanSchema),
   currentDelegationIndex: z.number().int().nonnegative(),
+  diagnosis: DiagnosisSchema.nullable().optional(),
+  diagnosisRepairPlan: DiagnosisRepairPlanSchema.nullable().optional(),
   updatedAt: z.string(),
 });
 
@@ -65,6 +73,8 @@ export class MissionState {
   private delegations: Delegation[] = [];
   private auditResults: Record<string, AuditResult> = {};
   private repairPlans: Record<string, RepairPlan> = {};
+  private diagnosis: Diagnosis | null = null;
+  private diagnosisRepairPlan: DiagnosisRepairPlan | null = null;
 
   constructor(baseDir: string, missionId: string) {
     const sanitized = sanitizeMissionId(missionId);
@@ -103,6 +113,8 @@ export class MissionState {
     this.delegations = validated.delegations;
     this.auditResults = validated.auditResults;
     this.repairPlans = validated.repairPlans;
+    this.diagnosis = validated.diagnosis ?? null;
+    this.diagnosisRepairPlan = validated.diagnosisRepairPlan ?? null;
   }
 
   private async loadFromJsonl(): Promise<void> {
@@ -206,6 +218,20 @@ export class MissionState {
           this.mission.visualQaEvidence = payload.visualQaEvidence as VisualQaEvidence;
         }
         break;
+      case "mission.diagnosis.started":
+        this.mission.status = "diagnosis-planned";
+        break;
+      case "mission.diagnosis.completed":
+        if (payload.diagnosis) {
+          this.diagnosis = payload.diagnosis as Diagnosis;
+          this.mission.diagnosis = payload.diagnosis as Diagnosis;
+        }
+        if (payload.repairPlan) {
+          this.diagnosisRepairPlan = payload.repairPlan as DiagnosisRepairPlan;
+          this.mission.diagnosisRepairPlan = payload.repairPlan as DiagnosisRepairPlan;
+        }
+        this.mission.status = "diagnosis-planned";
+        break;
     }
 
     this.mission.updatedAt = new Date().toISOString();
@@ -238,6 +264,8 @@ export class MissionState {
       auditResults: this.auditResults,
       repairPlans: this.repairPlans,
       currentDelegationIndex: this.mission.currentDelegationIndex,
+      diagnosis: this.diagnosis,
+      diagnosisRepairPlan: this.diagnosisRepairPlan,
       updatedAt: new Date().toISOString(),
     };
 
@@ -283,6 +311,14 @@ export class MissionState {
 
   getVisualQaEvidence(): VisualQaEvidence | undefined {
     return this.mission.visualQaEvidence ? { ...this.mission.visualQaEvidence } : undefined;
+  }
+
+  getDiagnosis(): Diagnosis | null {
+    return this.diagnosis ? { ...this.diagnosis } : null;
+  }
+
+  getDiagnosisRepairPlan(): DiagnosisRepairPlan | null {
+    return this.diagnosisRepairPlan ? { ...this.diagnosisRepairPlan } : null;
   }
 
   async setMission(mission: Mission): Promise<void> {
@@ -375,6 +411,33 @@ export class MissionState {
   async updateDelegationIndex(index: number): Promise<void> {
     this.mission.currentDelegationIndex = index;
     await this.saveSnapshot();
+  }
+
+  async recordDiagnosisStarted(): Promise<void> {
+    this.mission.status = "diagnosis-planned";
+    await this.appendEvent({ missionId: this.missionId, type: "mission.diagnosis.started", payload: {} });
+  }
+
+  async recordDiagnosisCompleted(diagnosis: Diagnosis, repairPlan: DiagnosisRepairPlan): Promise<void> {
+    this.diagnosis = { ...diagnosis };
+    this.diagnosisRepairPlan = { ...repairPlan };
+    this.mission.diagnosis = { ...diagnosis };
+    this.mission.diagnosisRepairPlan = { ...repairPlan };
+    this.mission.status = "diagnosis-planned";
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.diagnosis.completed",
+      payload: {
+        diagnosisId: diagnosis.id,
+        category: diagnosis.category,
+        severity: diagnosis.severity,
+        confidence: diagnosis.confidence,
+        repairPlanId: repairPlan.id,
+        actionCount: repairPlan.actions.length,
+        diagnosis,
+        repairPlan,
+      },
+    });
   }
 
   isTerminal(): boolean {
