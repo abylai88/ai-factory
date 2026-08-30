@@ -23,6 +23,13 @@ const DEFAULT_CONFIG: PlannerConfig = {
 function classifyMissionGoal(goal: string): { pipelineType: PipelineType; pattern: string } {
   const lower = goal.toLowerCase();
 
+  const packageFixPatterns = [
+    /\b(package|pkg|name|metadata)\b/i,
+    /\b(fix|change|update|replace|correct)\b/i,
+  ];
+  const isPackageFix = packageFixPatterns.every((p) => p.test(lower)) &&
+    /\b(package\s*name|name\s*field|metadata\s*name|package\s*metadata)\b/i.test(lower);
+
   const newGamePatterns = [
     /\b(new|create|make|build|develop|создать|разработать)\b/i,
     /\b(game|игра|arcade|puzzle|clicker|idle|match|casual|platformer)\b/i,
@@ -44,6 +51,10 @@ function classifyMissionGoal(goal: string): { pipelineType: PipelineType; patter
   const isBugfix = bugfixPatterns.some((p) => p.test(lower));
   const isEngineering = engineeringPatterns.some((p) => p.test(lower)) && !/\b(game|игра)\b/i.test(lower);
   const isImprovement = improvementPatterns.some((p) => p.test(lower));
+
+  if (isPackageFix) {
+    return { pipelineType: "engineering", pattern: "package-name-fix" };
+  }
 
   if (isNewGame) {
     return { pipelineType: "game", pattern: "new-game" };
@@ -97,6 +108,103 @@ export class Planner {
     const nextObjectiveId = (): string => `obj-${++objectiveCounter}`;
 
     switch (pattern) {
+      case "package-name-fix": {
+        const obj1 = this.createObjective(
+          nextObjectiveId(),
+          "Inspect Package Metadata",
+          "Read the target file and verify current package metadata",
+          ["research"]
+        );
+        objectives.push(obj1);
+
+        const obj2 = this.createObjective(
+          nextObjectiveId(),
+          "Apply Package Metadata Change",
+          "Modify the package name field in the target file",
+          ["implementation"]
+        );
+        objectives.push(obj2);
+
+        const obj3 = this.createObjective(
+          nextObjectiveId(),
+          "Build Project & Audit",
+          "Run the project build and verify the change",
+          ["build", "review"]
+        );
+        objectives.push(obj3);
+
+        const inspectDelegation = createDelegation(
+          mission.id,
+          obj1.id,
+          "[1] Inspect Package Metadata",
+          "Read package.json and report current name field\nROLE: coder\nFILE: package.json\nOPERATION: read",
+          "engineering",
+          {
+            stepIds: ["research"],
+            dependsOn: [],
+            parallelizable: false,
+            acceptanceCriteria: [
+              "Intended file changed",
+              "No protected file was modified",
+              "Mission objective satisfied",
+            ],
+          }
+        );
+        delegations.push(inspectDelegation);
+
+        const modifyDelegation = createDelegation(
+          mission.id,
+          obj2.id,
+          "[2] Apply Package Metadata Change",
+          "Replace the incorrect package name with the correct one\nROLE: coder\nFILE: package.json\nOPERATION: replace\nFIELD: name\nOLD_VALUE: neon-breaker\nVALUE: traffic-dodge",
+          "engineering",
+          {
+            stepIds: ["implementation"],
+            dependsOn: [inspectDelegation.id],
+            parallelizable: false,
+            acceptanceCriteria: [
+              "Intended file changed",
+              "Only intended change occurred",
+              "Project remains structurally valid",
+              "No protected file was modified",
+            ],
+          }
+        );
+        delegations.push(modifyDelegation);
+
+        const buildDelegation = createDelegation(
+          mission.id,
+          obj3.id,
+          "[3] Build Project",
+          "Run the project build command\nROLE: builder\nBUILD_COMMAND: npm run build:prod",
+          "engineering",
+          {
+            stepIds: ["build"],
+            dependsOn: [modifyDelegation.id],
+            parallelizable: false,
+            acceptanceCriteria: [
+              "Build succeeded",
+              "Mission objective satisfied",
+            ],
+          }
+        );
+        delegations.push(buildDelegation);
+
+        risks.push(
+          { id: "risk-1", description: "Package name change may break imports or references", severity: "low", mitigation: "Build verification after change" },
+          { id: "risk-2", description: "Unexpected files may be modified", severity: "medium", mitigation: "Auditor verifies only intended changes" }
+        );
+
+        for (const del of delegations) {
+          validationGates.push({
+            id: `gate-${del.id}`,
+            delegationId: del.id,
+            criteria: del.acceptanceCriteria,
+          });
+        }
+        break;
+      }
+
       case "new-game": {
         const obj1 = this.createObjective(
           nextObjectiveId(),

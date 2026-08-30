@@ -174,6 +174,50 @@ export const MissionEventSchema = z.object({
 });
 export type MissionEvent = z.infer<typeof MissionEventSchema>;
 
+// ─── Phase 7: Controlled Code + Build Execution ──────────────────────
+
+export const CodingOperationSchema = z.object({
+  projectId: z.string(),
+  file: z.string(),
+  operation: z.enum(["read", "replace"]),
+  oldString: z.string().optional(),
+  newString: z.string().optional(),
+  field: z.string().optional(),
+  value: z.string().optional(),
+});
+export type CodingOperation = z.infer<typeof CodingOperationSchema>;
+
+export const BuildResultSchema = z.object({
+  command: z.string(),
+  status: z.enum(["success", "failure"]),
+  exitCode: z.number(),
+  stdout: z.string(),
+  stderr: z.string(),
+  durationMs: z.number().nonnegative(),
+});
+export type BuildResult = z.infer<typeof BuildResultSchema>;
+
+export const CodingResultSchema = z.object({
+  projectId: z.string(),
+  file: z.string(),
+  operation: z.string(),
+  beforeContent: z.string(),
+  afterContent: z.string(),
+  fieldChanged: z.string().optional(),
+  oldValue: z.string().optional(),
+  newValue: z.string().optional(),
+});
+export type CodingResult = z.infer<typeof CodingResultSchema>;
+
+export interface DelegationMetadata {
+  role?: "coder" | "builder" | "researcher" | "auditor";
+  codingOperation?: CodingOperation;
+  buildCommand?: string;
+  projectId?: string;
+  protectedPaths?: string[];
+  allowedProjectRoot?: string;
+}
+
 export interface MissionEventSink {
   publish(event: Omit<MissionEvent, "id" | "occurredAt">): MissionEvent;
 }
