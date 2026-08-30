@@ -16,6 +16,8 @@ import {
   MissionEvent,
   MissionStatus,
   DelegationStatus,
+  VisualQaResult,
+  VisualQaResultSchema,
 } from "./mission.js";
 
 export interface MissionSnapshot {
@@ -182,6 +184,20 @@ export class MissionState {
       case "mission.failed":
         this.mission.status = "failed";
         break;
+      case "mission.visual_qa.started":
+        this.mission.status = "auditing";
+        break;
+      case "mission.visual_qa.completed":
+      case "mission.visual_qa.failed":
+        if (payload.visualQa) {
+          this.mission.visualQa = payload.visualQa as VisualQaResult;
+        }
+        break;
+      case "mission.visual_qa.skipped":
+        if (payload.visualQa) {
+          this.mission.visualQa = payload.visualQa as VisualQaResult;
+        }
+        break;
     }
 
     this.mission.updatedAt = new Date().toISOString();
@@ -253,6 +269,10 @@ export class MissionState {
     return this.repairPlans[delegationId] ? { ...this.repairPlans[delegationId] } : undefined;
   }
 
+  getVisualQaResult(): VisualQaResult | undefined {
+    return this.mission.visualQa ? { ...this.mission.visualQa } : undefined;
+  }
+
   async setMission(mission: Mission): Promise<void> {
     this.mission = { ...mission };
     await this.appendEvent({ missionId: this.missionId, type: "mission.created", payload: this.mission });
@@ -322,6 +342,21 @@ export class MissionState {
   async startMission(): Promise<void> {
     this.mission.status = "running";
     await this.appendEvent({ missionId: this.missionId, type: "mission.started", payload: {} });
+  }
+
+  async recordVisualQaStarted(): Promise<void> {
+    this.mission.status = "auditing";
+    await this.appendEvent({ missionId: this.missionId, type: "mission.visual_qa.started", payload: {} });
+  }
+
+  async recordVisualQaResult(visualQa: VisualQaResult): Promise<void> {
+    this.mission.visualQa = { ...visualQa };
+    const eventType = visualQa.status === "passed"
+      ? "mission.visual_qa.completed"
+      : visualQa.status === "skipped"
+        ? "mission.visual_qa.skipped"
+        : "mission.visual_qa.failed";
+    await this.appendEvent({ missionId: this.missionId, type: eventType, payload: { visualQa } });
   }
 
   async updateDelegationIndex(index: number): Promise<void> {

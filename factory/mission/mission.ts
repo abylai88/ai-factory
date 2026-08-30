@@ -22,6 +22,7 @@ export const MissionContextSchema = z.object({
   template: z.string().optional(),
   workspace: z.string().optional(),
   existingPipelineId: z.string().optional(),
+  requiresVisualQa: z.boolean().optional(),
 });
 export type MissionContext = z.infer<typeof MissionContextSchema>;
 
@@ -33,6 +34,37 @@ export const MissionConstraintsSchema = z.object({
 });
 export type MissionConstraints = z.infer<typeof MissionConstraintsSchema>;
 
+// ─── Phase 8A: Visual QA ─────────────────────────────────────────────
+
+export const VisualQaArtifactRefSchema = z.object({
+  id: z.string(),
+  type: z.enum(["screenshot", "trace", "report"]),
+  label: z.string(),
+});
+export type VisualQaArtifactRef = z.infer<typeof VisualQaArtifactRefSchema>;
+
+export const VisualQaCheckResultSchema = z.object({
+  name: z.string(),
+  viewport: z.string(),
+  status: z.enum(["passed", "failed"]),
+  message: z.string().optional(),
+});
+export type VisualQaCheckResult = z.infer<typeof VisualQaCheckResultSchema>;
+
+export const VisualQaResultSchema = z.object({
+  status: z.enum(["passed", "failed", "skipped"]),
+  passed: z.boolean(),
+  checks: z.number().int().nonnegative(),
+  failedChecks: z.number().int().nonnegative(),
+  checkDetails: z.array(VisualQaCheckResultSchema).optional(),
+  errors: z.array(z.string()),
+  artifacts: z.array(VisualQaArtifactRefSchema),
+  runId: z.string().optional(),
+  startedAt: z.string(),
+  finishedAt: z.string(),
+});
+export type VisualQaResult = z.infer<typeof VisualQaResultSchema>;
+
 export const MissionSchema = z.object({
   id: z.string(),
   goal: z.string().min(1),
@@ -43,6 +75,7 @@ export const MissionSchema = z.object({
   updatedAt: z.string(),
   planId: z.string().optional(),
   currentDelegationIndex: z.number().int().nonnegative().default(0),
+  visualQa: VisualQaResultSchema.optional(),
 });
 export type Mission = z.infer<typeof MissionSchema>;
 
@@ -169,6 +202,10 @@ export const MissionEventSchema = z.object({
     "mission.repairing",
     "mission.completed",
     "mission.failed",
+    "mission.visual_qa.started",
+    "mission.visual_qa.completed",
+    "mission.visual_qa.failed",
+    "mission.visual_qa.skipped",
   ]),
   payload: z.record(z.string(), z.unknown()),
 });

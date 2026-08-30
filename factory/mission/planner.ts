@@ -7,6 +7,7 @@ import {
   ValidationGate,
   createExecutionPlan,
   createDelegation,
+  MissionContext,
 } from "./mission.js";
 import { selectPipeline, PipelineType } from "../pipeline/pipeline.js";
 
@@ -94,6 +95,13 @@ export class Planner {
 
     if (!this.config.allowedPipelines.includes(pipelineType)) {
       throw new Error(`Pipeline type "${pipelineType}" not allowed for this mission`);
+    }
+
+    const requiresVisualQa = this.shouldRequireVisualQa(pattern, mission);
+
+    // Set requiresVisualQa on the mission context for the orchestrator
+    if (requiresVisualQa && mission.context) {
+      mission.context.requiresVisualQa = true;
     }
 
     const steps = getPipelineSteps(pipelineType, mission.goal);
@@ -185,6 +193,7 @@ export class Planner {
             acceptanceCriteria: [
               "Build succeeded",
               "Mission objective satisfied",
+              "Visual QA passed",
             ],
           }
         );
@@ -367,6 +376,16 @@ export class Planner {
     }
 
     return createExecutionPlan(mission, objectives, delegations, risks, validationGates);
+  }
+
+  private shouldRequireVisualQa(pattern: string, mission: Mission): boolean {
+    // Read-only missions never require Visual QA
+    if (mission.constraints?.requireApproval === false && mission.goal.toLowerCase().includes("inspect")) {
+      return false;
+    }
+    // Coding/build missions that produce visual projects require Visual QA
+    const qaPatterns = ["package-name-fix", "new-game", "improvement"];
+    return qaPatterns.includes(pattern);
   }
 
   private createObjective(id: string, title: string, description: string, delegations: string[]): Objective {

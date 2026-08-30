@@ -71,4 +71,8 @@ export const MissionEventTypes = {
   MISSION_REPAIRING: "mission.repairing",
   MISSION_COMPLETED: "mission.completed",
   MISSION_FAILED: "mission.failed",
+  MISSION_VISUAL_QA_STARTED: "mission.visual_qa.started",
+  MISSION_VISUAL_QA_COMPLETED: "mission.visual_qa.completed",
+  MISSION_VISUAL_QA_FAILED: "mission.visual_qa.failed",
+  MISSION_VISUAL_QA_SKIPPED: "mission.visual_qa.skipped",
 } as const;

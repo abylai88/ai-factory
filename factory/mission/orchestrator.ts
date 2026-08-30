@@ -11,11 +11,13 @@ import {
   createAuditResult,
   createRepairPlan,
   AcceptanceCriteriaResult,
+  VisualQaResult,
 } from "./mission.js";
 import { MissionState } from "./state.js";
 import { MissionEventSink } from "./mission.js";
 import { MissionEventPublisher, createMissionEventPublisher, MissionEventTypes } from "./events.js";
 import { runGoal } from "../pipeline/pipeline-runner.js";
+import type { VisualQaAdapter } from "./visual-qa-adapter.js";
 
 export interface FactoryExecutionAdapter {
   runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string }): Promise<AgentResult>;
@@ -33,6 +35,7 @@ export interface OrchestratorConfig {
   auditor: Auditor;
   eventSink: MissionEventSink;
   missionState: MissionState;
+  visualQaAdapter?: VisualQaAdapter;
 }
 
 const DEFAULT_MAX_REPAIRS = 3;
@@ -54,6 +57,7 @@ export class MissionOrchestrator {
       auditor: config.auditor,
       eventSink: config.eventSink,
       missionState: config.missionState,
+      visualQaAdapter: config.visualQaAdapter,
     };
     this.publisher = createMissionEventPublisher(this.config.eventSink);
   }
@@ -80,9 +84,15 @@ export class MissionOrchestrator {
           continue;
         }
 
-        await this.executeDelegation(delegation);
+        const agentResult = await this.executeDelegation(delegation);
 
         if (!this.isRunning) break;
+
+        // Phase 8A: Run Visual QA after successful build if required
+        const isBuilder = delegation.description.includes("ROLE: builder") || delegation.description.includes("BUILD_COMMAND:");
+        if (isBuilder && agentResult.status === "passed" && this.currentMission?.context?.requiresVisualQa) {
+          await this.runVisualQa(delegation);
+        }
 
         const auditResult = await this.auditDelegation(delegation);
 
@@ -169,6 +179,72 @@ export class MissionOrchestrator {
     });
 
     return agentResult;
+  }
+
+  private async runVisualQa(buildDelegation: Delegation): Promise<void> {
+    const adapter = this.config.visualQaAdapter;
+    if (!adapter) {
+      // No QA adapter available — record skip
+      const now = new Date().toISOString();
+      const skippedResult: VisualQaResult = {
+        status: "skipped",
+        passed: false,
+        checks: 0,
+        failedChecks: 0,
+        errors: [],
+        artifacts: [],
+        startedAt: now,
+        finishedAt: now,
+      };
+      await this.config.missionState.recordVisualQaResult(skippedResult);
+      this.publisher.publish({
+        missionId: buildDelegation.missionId,
+        type: MissionEventTypes.MISSION_VISUAL_QA_SKIPPED,
+        payload: { reason: "No Visual QA adapter configured" },
+      });
+      // Refresh current mission from state
+      this.currentMission = this.config.missionState.getMission();
+      return;
+    }
+
+    this.publisher.publish({
+      missionId: buildDelegation.missionId,
+      type: MissionEventTypes.MISSION_VISUAL_QA_STARTED,
+      payload: { buildDelegationId: buildDelegation.id },
+    });
+    await this.config.missionState.recordVisualQaStarted();
+
+    const projectId = this.currentMission?.context?.projectId ?? "unknown";
+    const runId = `mission-${this.currentMission?.id ?? "unknown"}-${Date.now()}`;
+
+    const result = await adapter.run({
+      projectId,
+      projectPath: this.config.project,
+      runId,
+    });
+
+    await this.config.missionState.recordVisualQaResult(result);
+
+    // Refresh current mission from state so auditor sees the QA result
+    this.currentMission = this.config.missionState.getMission();
+
+    const eventType = result.status === "passed"
+      ? MissionEventTypes.MISSION_VISUAL_QA_COMPLETED
+      : MissionEventTypes.MISSION_VISUAL_QA_FAILED;
+
+    this.publisher.publish({
+      missionId: buildDelegation.missionId,
+      type: eventType,
+      payload: {
+        status: result.status,
+        passed: result.passed,
+        checks: result.checks,
+        failedChecks: result.failedChecks,
+        errors: result.errors,
+        artifactCount: result.artifacts.length,
+        runId: result.runId,
+      },
+    });
   }
 
   async auditDelegation(delegation: Delegation): Promise<AuditResult> {

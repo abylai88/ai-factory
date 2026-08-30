@@ -440,6 +440,9 @@ export class CodingMissionAuditor implements Auditor {
     if (lower.includes("mission objective") || lower.includes("objective satisfied")) {
       return this.evaluateMissionObjective(result, delegation, mission);
     }
+    if (lower.includes("visual qa passed") || lower.includes("visual qa completed")) {
+      return this.evaluateVisualQaPassed(mission);
+    }
     if (lower.includes("codebase analyzed")) {
       return this.evaluateGenericKeyword(criterion, result, ["analyzed", "analysis", "inspected", "reviewed"]);
     }
@@ -572,6 +575,23 @@ export class CodingMissionAuditor implements Auditor {
       return { passed: true, evidence: "Mission objective appears satisfied" };
     }
     return { passed: false, evidence: "Mission objective status unclear" };
+  }
+
+  private evaluateVisualQaPassed(mission: Mission): { passed: boolean; evidence: string } {
+    if (!mission.context?.requiresVisualQa) {
+      return { passed: true, evidence: "Visual QA not required for this mission" };
+    }
+    const qa = mission.visualQa;
+    if (!qa) {
+      return { passed: false, evidence: "Visual QA result not available" };
+    }
+    if (qa.status === "skipped") {
+      return { passed: true, evidence: "Visual QA was skipped (no adapter configured or build failed)" };
+    }
+    if (qa.passed) {
+      return { passed: true, evidence: `Visual QA passed: ${qa.checks} checks, ${qa.failedChecks} failures` };
+    }
+    return { passed: false, evidence: `Visual QA failed: ${qa.failedChecks} check failures out of ${qa.checks}` };
   }
 
   private evaluateGenericKeyword(criterion: string, result: AgentResult, keywords: string[]): { passed: boolean; evidence: string } {
