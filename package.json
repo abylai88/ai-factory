@@ -4,13 +4,15 @@
   "type": "module",
   "scripts": {
     "start": "tsx factory/orchestrator/index.ts",
+    "mission": "tsx factory/mission/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@opencode-ai/sdk": "^1.18.23",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
