@@ -17,32 +17,48 @@ import { InMemoryEventSink, NoopEventSink, MissionEventPublisher, createMissionE
 import { resolveWorkspaceDir } from "../setup/project-setup.js";
 import { classifyGoal, detectEngine } from "../engine/engine.js";
 import { TemplateManager } from "../setup/project-setup.js";
+import { ProjectProvisioner } from "./project-provisioner.js";
+import { MissionProjectManager, MissionAwareFactoryAdapter } from "./mission-project-manager.js";
+
+const ALLOWED_TEMPLATES = ["yagames-phaser-template"] as const;
 
 function parseArgs(argv: string[]): {
   command: string;
   goal: string;
   project?: string;
+  projectId?: string;
+  template?: string;
   dryRun: boolean;
   maxRepairs: number;
   engine?: string;
   force: boolean;
   fromStep?: string;
+  listTemplates: boolean;
 } {
   const args = [...argv];
   const command = args.shift() ?? "";
 
   const positional: string[] = [];
   let project: string | undefined;
+  let projectId: string | undefined;
+  let template: string | undefined;
   let dryRun = false;
   let maxRepairs = 3;
   let engine: string | undefined;
   let force = false;
   let fromStep: string | undefined;
+  let listTemplates = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--project") {
       project = args[++i];
+    } else if (a === "--project-id") {
+      projectId = args[++i];
+    } else if (a === "--template") {
+      template = args[++i];
+    } else if (a === "--list-templates") {
+      listTemplates = true;
     } else if (a === "--dry-run") {
       dryRun = true;
     } else if (a === "--max-repairs") {
@@ -64,11 +80,14 @@ function parseArgs(argv: string[]): {
     command,
     goal: positional.join(" ").trim(),
     project,
+    projectId,
+    template,
     dryRun,
     maxRepairs,
     engine,
     force,
     fromStep,
+    listTemplates,
   };
 }
 
@@ -79,9 +98,13 @@ function printUsage(): void {
 Usage:
   npx tsx factory/mission/index.ts run "Goal" [options]
   npm run mission -- run "Goal" [options]
+  npm run mission -- list-templates
 
 Options:
   --project <dir>       Project directory (default: ./projects/<slug>)
+  --project-id <id>     Use existing project by ID (must be in projects/)
+  --template <id>       Template to use for new project (default: auto)
+  --list-templates      List available allowlisted templates
   --engine <name>       Engine: web | unity (default: auto-classified)
   --max-repairs <N>     Max repair iterations per delegation (default: 3)
   --dry-run             Show mission plan, do NOT execute
@@ -90,8 +113,9 @@ Options:
 
 Examples:
   npm run mission -- run "Build a platformer game"
-  npm run mission -- run "Fix TypeScript errors" --pipeline engineering --dry-run
-  npm run mission -- run "Add new level" --project ./projects/traffic-dodge --max-repairs 2
+  npm run mission -- run "Fix TypeScript errors" --dry-run
+  npm run mission -- run "Add new level" --project-id traffic-dodge
+  npm run mission -- list-templates
 `);
 }
 
@@ -100,7 +124,10 @@ async function setupWorkspace(
   goal: string,
   projectDir: string | undefined,
   engineOverride: string | undefined,
-  force: boolean
+  force: boolean,
+  provisioner: ProjectProvisioner,
+  projectId?: string,
+  templateOverride?: string
 ): Promise<{ workspaceDir: string; engine: ReturnType<typeof classifyGoal>; template: NonNullable<Awaited<ReturnType<TemplateManager["templateFor"]>>> }> {
   const explicitEngine = engineOverride ? classifyGoal(goal, engineOverride) : undefined;
   const goalEngine = explicitEngine ?? classifyGoal(goal);
@@ -113,13 +140,28 @@ async function setupWorkspace(
     throw new Error(`Unsupported engine: ${goalEngine.reason}`);
   }
 
-  const workspaceDir = projectDir ?? resolveWorkspaceDir(baseDir, goal);
-
   const setup = new TemplateManager(baseDir);
   const template = await setup.templateFor(goalEngine);
 
   if (!template) {
     throw new Error("No embedded template found for WEB projects.");
+  }
+
+  let workspaceDir: string;
+
+  if (projectDir) {
+    workspaceDir = projectDir;
+  } else if (projectId) {
+    const candidatePath = path.join(baseDir, "projects", projectId);
+    const validation = await provisioner.validateProject(candidatePath);
+    if (validation.valid) {
+      workspaceDir = candidatePath;
+    } else {
+      const handle = await provisioner.provision(templateOverride ?? template.id, projectId);
+      workspaceDir = handle.projectPath;
+    }
+  } else {
+    workspaceDir = resolveWorkspaceDir(baseDir, goal);
   }
 
   console.log("📦 Setting up project workspace...");
@@ -135,7 +177,24 @@ async function setupWorkspace(
 }
 
 async function main(): Promise<void> {
-  const { command, goal, project, dryRun, maxRepairs, engine, force, fromStep } = parseArgs(process.argv.slice(2));
+  const { command, goal, project, projectId, template, dryRun, maxRepairs, engine, force, fromStep, listTemplates } = parseArgs(process.argv.slice(2));
+
+  if (command === "list-templates" || listTemplates) {
+    const baseDir = path.resolve(process.env.AI_FACTORY_HOME ?? process.cwd());
+    const provisioner = new ProjectProvisioner({
+      baseDir,
+      templatesDir: path.join(baseDir, "templates"),
+      projectsDir: path.join(baseDir, "projects"),
+      allowedTemplateIds: ALLOWED_TEMPLATES,
+    });
+    const templates = await provisioner.listTemplates();
+    console.log("\nAvailable Templates:");
+    for (const t of templates) {
+      const status = t.exists ? "✅" : "❌ missing";
+      console.log(`  ${t.id} — ${status}`);
+    }
+    return;
+  }
 
   if (!command || command !== "run" || !goal) {
     printUsage();
@@ -154,17 +213,26 @@ async function main(): Promise<void> {
   console.log(dryRun ? "🧪 MODE: DRY-RUN" : "🧠 MODE: LIVE");
   console.log(`🔧 MAX REPAIRS: ${maxRepairs}`);
 
-  const { workspaceDir, engine: goalEngine, template } = await setupWorkspace(baseDir, goal, project, engine, force);
+  const provisioner = new ProjectProvisioner({
+    baseDir,
+    templatesDir: path.join(baseDir, "templates"),
+    projectsDir: path.join(baseDir, "projects"),
+    allowedTemplateIds: ALLOWED_TEMPLATES,
+  });
+
+  const projectManager = new MissionProjectManager({ baseDir, provisioner });
+
+  const { workspaceDir, engine: goalEngine, template: templateDesc } = await setupWorkspace(baseDir, goal, project, engine, force, provisioner, projectId, template);
 
   console.log("📁 WORKSPACE:", workspaceDir);
   console.log(`⚙️  ENGINE: ${goalEngine.kind}${goalEngine.stack ? " — " + goalEngine.stack : ""}`);
-  console.log(`🗂  TEMPLATE: templates/${template.id}`);
+  console.log(`🗂  TEMPLATE: templates/${templateDesc.id}`);
 
   const context: MissionContext = {
-    projectId: path.basename(workspaceDir),
+    projectId: projectId ?? path.basename(workspaceDir),
     engine: goalEngine.kind,
     stack: goalEngine.stack,
-    template: template.id,
+    template: templateDesc.id,
     workspace: workspaceDir,
   };
 
@@ -221,7 +289,8 @@ async function main(): Promise<void> {
   }
 
   const eventSink = new InMemoryEventSink();
-  const factoryAdapter = new RealFactoryAdapter();
+  const innerAdapter = new RealFactoryAdapter();
+  const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager }, innerAdapter);
   const auditor = new DeterministicAuditor();
 
   const orchestrator = new MissionOrchestrator({

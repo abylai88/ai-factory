@@ -15,6 +15,7 @@ import {
 import { MissionState, MissionSnapshot } from "../../../factory/mission/state.js";
 import { InMemoryEventSink } from "../../../factory/mission/events.js";
 import { Planner, createPlanner } from "../../../factory/mission/planner.js";
+import { ProjectProvisioner } from "../../../factory/mission/project-provisioner.js";
 import type { EventBus } from "./events.js";
 
 export interface MissionServiceConfig {
@@ -43,12 +44,13 @@ export interface MissionDetail {
   recentEvents: MissionEvent[];
 }
 
-const ALLOWED_PROJECTS = ["traffic-dodge"];
+const ALLOWED_TEMPLATES = ["yagames-phaser-template"] as const;
 
 export class MissionService {
   private readonly factoryRoot: string;
   private readonly eventBus: EventBus;
   private readonly missionsDir: string;
+  private readonly provisioner: ProjectProvisioner;
   private readonly runningMissions = new Map<string, MissionState>();
   private readonly eventSinks = new Map<string, InMemoryEventSink>();
 
@@ -56,6 +58,12 @@ export class MissionService {
     this.factoryRoot = config.factoryRoot;
     this.eventBus = config.eventBus;
     this.missionsDir = path.join(this.factoryRoot, "outputs", "missions");
+    this.provisioner = new ProjectProvisioner({
+      baseDir: config.factoryRoot,
+      templatesDir: path.join(config.factoryRoot, "templates"),
+      projectsDir: path.join(config.factoryRoot, "projects"),
+      allowedTemplateIds: ALLOWED_TEMPLATES,
+    });
   }
 
   async listMissions(): Promise<MissionListItem[]> {
@@ -141,8 +149,13 @@ export class MissionService {
     if (goal.length > 1000) {
       throw new Error("Mission goal must be 1000 characters or fewer");
     }
-    if (projectId && !ALLOWED_PROJECTS.includes(projectId)) {
-      throw new Error(`Project "${projectId}" is not in the allowlist. Allowed: ${ALLOWED_PROJECTS.join(", ")}`);
+
+    if (projectId) {
+      const projectPath = path.join(this.factoryRoot, "projects", projectId);
+      const validation = await this.provisioner.validateProject(projectPath);
+      if (!validation.valid) {
+        throw new Error(`Project "${projectId}" is not found or invalid.`);
+      }
     }
 
     const context = projectId ? { projectId } : undefined;
