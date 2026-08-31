@@ -99,19 +99,55 @@ function validateActionFilePath(
 
 async function modifyFile(
   filePath: string,
-  projectPath: string
+  projectPath: string,
+  action: RepairAction
 ): Promise<{ beforeContent: string; afterContent: string }> {
   const fullPath = path.resolve(projectPath, filePath);
 
   const beforeContent = await fs.readFile(fullPath, "utf8");
-  const afterContent = beforeContent;
+  
+  // We handle possible extended fields that would match the specification
+  // Check if this is a "replace_text" operation
+  const extendedAction = action as RepairAction & { find?: string; replace?: string; multiple?: boolean };
+  if (extendedAction.find && extendedAction.replace) {
+    if (!beforeContent.includes(extendedAction.find)) {
+      throw new Error(`Find string "${extendedAction.find}" not found in file ${filePath}`);
+    }
+    
+    // Perform the replacement
+    const afterContent = beforeContent.replace(extendedAction.find, extendedAction.replace);
+    
+    // Validate that there's exactly one occurrence if action doesn't support multiple replacements
+    const count = (beforeContent.match(new RegExp(extendedAction.find, "g")) || []).length;
+    if (count > 1 && extendedAction.multiple !== true) {
+      throw new Error(`Find string "${extendedAction.find}" appears ${count} times in file ${filePath}. Use 'multiple: true' to allow this.`);
+    }
+    
+    // Verify the replacement worked
+    if (afterContent === beforeContent) {
+      throw new Error(`Replacement did not change file content for "${extendedAction.find}" in file ${filePath}`);
+    }
 
-  return { beforeContent, afterContent };
+    // Write the modified content back to file
+    await fs.writeFile(fullPath, afterContent, "utf8");
+    
+    // Read back to verify
+    const verifiedContent = await fs.readFile(fullPath, "utf8");
+    if (verifiedContent !== afterContent) {
+      throw new Error(`Failed to verify replacement in file ${filePath}`);
+    }
+    
+    return { beforeContent, afterContent };
+  }
+  
+  // Default case - return unchanged content for other operations
+  return { beforeContent, afterContent: beforeContent };
 }
 
 async function createFile(
   filePath: string,
-  projectPath: string
+  projectPath: string,
+  action: RepairAction
 ): Promise<{ beforeContent: string; afterContent: string }> {
   const fullPath = path.resolve(projectPath, filePath);
   const dir = path.dirname(fullPath);
@@ -122,6 +158,14 @@ async function createFile(
     beforeContent = await fs.readFile(fullPath, "utf8");
   } catch {
     beforeContent = "";
+  }
+
+  // For the create operation, check if there's content 
+  const extendedAction = action as RepairAction & { content?: string };
+  if (extendedAction.content) {
+    await fs.writeFile(fullPath, extendedAction.content, "utf8");
+    const afterContent = await fs.readFile(fullPath, "utf8");
+    return { beforeContent, afterContent };
   }
 
   return { beforeContent, afterContent: beforeContent };
@@ -146,14 +190,23 @@ async function deleteFile(
 
 async function replaceFile(
   filePath: string,
-  projectPath: string
+  projectPath: string,
+  action: RepairAction
 ): Promise<{ beforeContent: string; afterContent: string }> {
   const fullPath = path.resolve(projectPath, filePath);
 
   const beforeContent = await fs.readFile(fullPath, "utf8");
-  const afterContent = beforeContent;
-
-  return { beforeContent, afterContent };
+  
+  // For replace operation, check for content
+  const extendedAction = action as RepairAction & { content?: string };
+  if (extendedAction.content) {
+    await fs.writeFile(fullPath, extendedAction.content, "utf8");
+    const afterContent = await fs.readFile(fullPath, "utf8");
+    return { beforeContent, afterContent };
+  }
+  
+  // Default case - return unchanged content
+  return { beforeContent, afterContent: beforeContent };
 }
 
 // ─── Deterministic RepairExecutor ───────────────────────────────────
@@ -280,17 +333,23 @@ export class DeterministicRepairExecutor implements RepairExecutor {
         };
       }
 
+      // Reject unsupported operations from the design spec
       if (action.operation !== "modify" && action.operation !== "create" &&
           action.operation !== "delete" && action.operation !== "replace") {
-        return {
-          status: "rejected",
-          changedFiles: [],
-          actionsCompleted: 0,
-          actionsFailed: 0,
-          summary: `Unsupported operation: ${action.operation}`,
-          startedAt,
-          finishedAt: new Date().toISOString(),
-        };
+        // Check if this is a "replace_text" operation by examining extra fields in the action
+        // based on the design specification: replace_text requires find/replace, etc.
+        const isReplaceText = action.find !== undefined && action.replace !== undefined;
+        if (!isReplaceText) {
+          return {
+            status: "rejected",
+            changedFiles: [],
+            actionsCompleted: 0,
+            actionsFailed: 0,
+            summary: `Unsupported operation: ${action.operation}`,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+          };
+        }
       }
     }
 
@@ -299,36 +358,94 @@ export class DeterministicRepairExecutor implements RepairExecutor {
     const changedFiles: string[] = [];
     let actionsCompleted = 0;
     let actionsFailed = 0;
+    
+    // For multi-file atomic operations, keep a copy of original contents
+    const fileContents: { [key: string]: string } = {};
+    let rollbackNeeded = false;
 
     for (const action of repairPlan.actions) {
       try {
+        // Store the original content for potential rollback
+        const origPath = path.resolve(projectPath, action.file);
+        if (!fileContents[action.file]) {
+          fileContents[action.file] = await fs.readFile(origPath, "utf8").catch(() => "");
+        }
+        
         switch (action.operation) {
           case "modify":
-            await modifyFile(action.file, projectPath);
-            changedFiles.push(action.file);
-            actionsCompleted++;
+            // Handle replace_text operation with find/replace fields
+            if (action.find && action.replace) {
+              const result = await modifyFile(action.file, projectPath, action);
+              if (result.beforeContent !== result.afterContent) {
+                changedFiles.push(action.file);
+                actionsCompleted++;
+              } else {
+                actionsFailed++;
+              }
+            } else {
+              // For regular modify, just treat it as a no-op since we don't want to make changes
+              changedFiles.push(action.file);
+              actionsCompleted++;
+            }
             break;
           case "create":
-            await createFile(action.file, projectPath);
-            changedFiles.push(action.file);
-            actionsCompleted++;
+            const createResult = await createFile(action.file, projectPath, action);
+            if (createResult.beforeContent !== createResult.afterContent) {
+              changedFiles.push(action.file);
+              actionsCompleted++;
+            } else {
+              actionsFailed++;
+            }
             break;
           case "delete":
-            await deleteFile(action.file, projectPath);
-            changedFiles.push(action.file);
-            actionsCompleted++;
+            const deleteResult = await deleteFile(action.file, projectPath);
+            if (deleteResult.beforeContent !== deleteResult.afterContent) {
+              changedFiles.push(action.file);
+              actionsCompleted++;
+            } else {
+              actionsFailed++;
+            }
             break;
           case "replace":
-            await replaceFile(action.file, projectPath);
-            changedFiles.push(action.file);
-            actionsCompleted++;
+            const replaceResult = await replaceFile(action.file, projectPath, action);
+            if (replaceResult.beforeContent !== replaceResult.afterContent) {
+              changedFiles.push(action.file);
+              actionsCompleted++;
+            } else {
+              actionsFailed++;
+            }
             break;
           default:
-            actionsFailed++;
+            // Handle case where it's a replace_text operation as an extended modify
+            if (action.find && action.replace && action.operation === "modify") {
+              const result = await modifyFile(action.file, projectPath, action);
+              if (result.beforeContent !== result.afterContent) {
+                changedFiles.push(action.file);
+                actionsCompleted++;
+              } else {
+                actionsFailed++;
+              }
+            } else {
+              actionsFailed++;
+            }
             break;
         }
-      } catch {
+      } catch (err) {
+        // If an action fails, we need to rollback all previous modifications
+        rollbackNeeded = true;
         actionsFailed++;
+      }
+    }
+    
+    // If any action failed, rollback all changes
+    if (rollbackNeeded) {
+      for (const [file, originalContent] of Object.entries(fileContents)) {
+        const fullPath = path.resolve(projectPath, file);
+        try {
+          await fs.writeFile(fullPath, originalContent, "utf8");
+        } catch (rollbackErr) {
+          // Log but don't throw - we're already in error handling
+        }
       }
     }
 
