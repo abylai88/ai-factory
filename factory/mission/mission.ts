@@ -64,6 +64,10 @@ export const RepairActionSchema = z.object({
   reason: z.string().min(1),
   expectedOutcome: z.string().min(1),
   scope: RepairSafetyScopeSchema,
+  find: z.string().optional(),
+  replace: z.string().optional(),
+  multiple: z.boolean().optional(),
+  content: z.string().optional(),
 });
 export type RepairAction = z.infer<typeof RepairActionSchema>;
 
