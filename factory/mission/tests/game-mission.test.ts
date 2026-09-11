@@ -12,6 +12,11 @@ import { CodingMissionAuditor } from "../adapters.js";
 import { PlaywrightVisualQaAdapter } from "../playwright-visual-qa-adapter.js";
 import { DeterministicRepairExecutor } from "../repair-executor.js";
 import { MissionProjectManager, MissionAwareFactoryAdapter } from "../mission-project-manager.js";
+import { MissionPlanner, createMissionPlanner } from "../mission-planner.js";
+import { OpenCodePlannerModel } from "../opencode-planner-model.js";
+import { createModelRouter } from "../model-router.js";
+import { createMissionSupervisor } from "../mission-supervisor.js";
+import { PeerReviewSystem, defaultReviewExecutor } from "../peer-review.js";
 
 vi.mock("../project-provisioner.js");
 vi.mock("../mission.js", async (importOriginal) => {
@@ -22,6 +27,14 @@ vi.mock("../planner.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../planner.js")>();
   return { ...actual, createPlanner: vi.fn() };
 });
+vi.mock("../mission-planner.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../mission-planner.js")>();
+  return { ...actual, createMissionPlanner: vi.fn() };
+});
+vi.mock("../opencode-planner-model.js");
+vi.mock("../model-router.js");
+vi.mock("../mission-supervisor.js");
+vi.mock("../peer-review.js");
 vi.mock("../orchestrator.js");
 vi.mock("../state.js");
 vi.mock("../adapters.js");
@@ -189,6 +202,39 @@ describe("executeGameMission", () => {
         return { execute: vi.fn() } as unknown as InstanceType<typeof DeterministicRepairExecutor>;
       } as unknown as new (...args: unknown[]) => InstanceType<typeof DeterministicRepairExecutor>
     );
+
+    // Mock MissionPlanner and OpenCodePlannerModel for Phase 10
+    vi.mocked(OpenCodePlannerModel).mockImplementation(
+      function (this: unknown) {
+        return {} as unknown as InstanceType<typeof OpenCodePlannerModel>;
+      } as unknown as new (...args: unknown[]) => InstanceType<typeof OpenCodePlannerModel>
+    );
+
+    const mockPlannerInstance = {
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    };
+    vi.mocked(createMissionPlanner).mockReturnValue(
+      mockPlannerInstance as unknown as MissionPlanner
+    );
+
+    // Mock Phase 8-9 systems
+    vi.mocked(createModelRouter).mockReturnValue({
+      chooseModel: vi.fn().mockReturnValue({ primary: "test-model", fallbacks: [], reason: "test" }),
+      nextFallback: vi.fn().mockReturnValue(null),
+    } as unknown as ReturnType<typeof createModelRouter>);
+
+    vi.mocked(createMissionSupervisor).mockReturnValue({
+      observeDelegationStarted: vi.fn(),
+      observeDelegationCompleted: vi.fn(),
+      handleDelegationFailure: vi.fn(),
+      getCounters: vi.fn().mockReturnValue({ decisionCount: 0, recoveryCount: 0 }),
+    } as unknown as ReturnType<typeof createMissionSupervisor>);
+
+    vi.mocked(PeerReviewSystem).mockImplementation(
+      function (this: unknown) {
+        return {} as unknown as InstanceType<typeof PeerReviewSystem>;
+      } as unknown as new (...args: unknown[]) => InstanceType<typeof PeerReviewSystem>
+    );
   });
 
   it("should reject empty goal", async () => {
@@ -205,9 +251,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "analyze the project structure" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result.workflowMode).toBe("research");
   });
@@ -216,9 +262,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug in the game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result.workflowMode).toBe("coding");
   });
@@ -227,9 +273,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result.workflowMode).toBe("game");
   });
@@ -238,9 +284,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result.projectId).toBe("test-project-123");
     expect(result.projectPath).toBe("/projects/test-project-123");
@@ -251,9 +297,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "improve the existing game", projectId: "existing-project-456" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result.projectId).toBe("existing-project-456");
     expect(result.projectPath).toBe(`${process.cwd()}/projects/existing-project-456`);
@@ -273,10 +319,10 @@ describe("executeGameMission", () => {
     const mockMission = makeMockMission(input.goal);
     const mockPlan = makeMockPlan("mission-123");
     vi.mocked(createMission).mockReturnValue(mockMission);
-    const mockPlanner = { decompose: vi.fn().mockReturnValue(mockPlan) } as unknown as Planner;
-    vi.mocked(createPlanner).mockReturnValue(mockPlanner);
+    const mockPlannerInstance = { createPlan: vi.fn().mockResolvedValue(mockPlan) };
+    vi.mocked(createMissionPlanner).mockReturnValue(mockPlannerInstance as unknown as MissionPlanner);
     const result = await executeGameMission(input);
-    expect(mockPlanner.decompose).toHaveBeenCalledWith(mockMission);
+    expect(mockPlannerInstance.createPlan).toHaveBeenCalled();
     expect(result.plan).toEqual(mockPlan);
   });
 
@@ -285,9 +331,9 @@ describe("executeGameMission", () => {
     const mockPlan = makeMockPlan("mission-123");
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result.plan).toEqual(mockPlan);
   });
@@ -297,9 +343,9 @@ describe("executeGameMission", () => {
     const mockPlan = makeMockPlan("mission-123");
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result).toHaveProperty("missionId");
     expect(result).toHaveProperty("status");
@@ -320,9 +366,9 @@ describe("executeGameMission", () => {
     const mockPlan = makeMockPlan("mission-123");
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     await executeGameMission(input);
     expect(MissionOrchestrator).not.toHaveBeenCalled();
   });
@@ -332,9 +378,9 @@ describe("executeGameMission", () => {
     const mockPlan = makeMockPlan("mission-123");
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result).not.toHaveProperty("build");
   });
@@ -344,9 +390,9 @@ describe("executeGameMission", () => {
     const mockPlan = makeMockPlan("mission-123");
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result).not.toHaveProperty("visualQa");
   });
@@ -356,9 +402,9 @@ describe("executeGameMission", () => {
     const mockPlan = makeMockPlan("mission-123");
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     const result = await executeGameMission(input);
     expect(result).not.toHaveProperty("repairCycles");
   });
@@ -367,9 +413,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -381,9 +427,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -395,9 +441,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -409,9 +455,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -423,9 +469,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -437,9 +483,9 @@ describe("executeGameMission", () => {
     const mockMission = makeMockMission(input.goal);
     const mockPlan = makeMockPlan("mission-123");
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -452,9 +498,9 @@ describe("executeGameMission", () => {
     const mockDelegation = { id: "del-1", title: "step 1", description: "do something" };
     const mockPlan = { ...makeMockPlan("mission-123"), delegations: [mockDelegation] };
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -465,9 +511,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const completedMission = { ...mockMission, status: "completed" as const };
     mockOrchestratorInstance.executeMission.mockResolvedValue(completedMission);
     mockStateInstance.getMission.mockReturnValue(completedMission);
@@ -480,9 +526,9 @@ describe("executeGameMission", () => {
     const mockMission = makeMockMission(input.goal);
     const mockPlan = makeMockPlan("mission-123");
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(mockPlan),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(mockPlan),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     const result = await executeGameMission(input);
@@ -493,9 +539,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     mockStateInstance.getDelegations.mockReturnValue([
@@ -515,9 +561,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     const mockAuditResult = {
@@ -539,9 +585,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     mockStateInstance.getRepairCycleCount.mockReturnValue(2);
@@ -553,9 +599,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     const mockDelegations = [{ id: "del-1", title: "step 1", description: "do something" }];
@@ -568,9 +614,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     const result = await executeGameMission(input);
@@ -584,9 +630,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "analyze the codebase" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     await executeGameMission(input);
     expect(MissionOrchestrator).not.toHaveBeenCalled();
     expect(PlaywrightVisualQaAdapter).not.toHaveBeenCalled();
@@ -597,9 +643,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const failedMission = { ...mockMission, status: "failed" as const };
     mockOrchestratorInstance.executeMission.mockResolvedValue(failedMission);
     mockStateInstance.getMission.mockReturnValue(failedMission);
@@ -611,9 +657,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -625,9 +671,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -639,9 +685,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const completedMission = { ...mockMission, status: "completed" as const };
     mockOrchestratorInstance.executeMission.mockResolvedValue(completedMission);
     mockStateInstance.getMission.mockReturnValue(completedMission);
@@ -653,9 +699,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     const completedMission = { ...mockMission, status: "completed" as const };
     mockOrchestratorInstance.executeMission.mockResolvedValue(completedMission);
     mockStateInstance.getMission.mockReturnValue(completedMission);
@@ -667,9 +713,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "analyze the codebase" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     await executeGameMission(input);
     expect(MissionState).not.toHaveBeenCalled();
   });
@@ -678,9 +724,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -692,9 +738,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -706,9 +752,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -719,9 +765,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -732,9 +778,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "create a new game" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);
@@ -747,9 +793,9 @@ describe("executeGameMission", () => {
     const input: GameMissionInput = { goal: "fix the bug" };
     const mockMission = makeMockMission(input.goal);
     vi.mocked(createMission).mockReturnValue(mockMission);
-    vi.mocked(createPlanner).mockReturnValue({
-      decompose: vi.fn().mockReturnValue(makeMockPlan("mission-123")),
-    } as unknown as Planner);
+    vi.mocked(createMissionPlanner).mockReturnValue({
+      createPlan: vi.fn().mockResolvedValue(makeMockPlan("mission-123")),
+    } as unknown as MissionPlanner);
     mockOrchestratorInstance.executeMission.mockResolvedValue({ ...mockMission, status: "completed" });
     mockStateInstance.getMission.mockReturnValue({ ...mockMission, status: "completed" });
     await executeGameMission(input);

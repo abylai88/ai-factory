@@ -121,7 +121,7 @@ class FakeBuildAdapterFactory implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     _mission: Mission,
-    _config: { baseDir: string; project: string; fromStep?: string }
+    _config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult> {
     this.executedDelegations.push(delegation.id);
     const isBuilder = delegation.description.includes("ROLE: builder") || delegation.description.includes("BUILD_COMMAND:");

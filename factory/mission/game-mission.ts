@@ -16,9 +16,14 @@ import { MissionOrchestrator, RealFactoryAdapter } from "./orchestrator.js";
 import { CodingMissionAuditor } from "./adapters.js";
 import { PlaywrightVisualQaAdapter } from "./playwright-visual-qa-adapter.js";
 import { DeterministicRepairExecutor } from "./repair-executor.js";
-import { InMemoryEventSink } from "./events.js";
+import { InMemoryEventSink, createMissionEventPublisher } from "./events.js";
 import { createPixelOfficeReporter } from "./pixel-office-reporter.js";
 import { MissionProjectManager, MissionAwareFactoryAdapter } from "./mission-project-manager.js";
+import { OpenCodePlannerModel } from "./opencode-planner-model.js";
+import { MissionPlanner, createMissionPlanner } from "./mission-planner.js";
+import { createModelRouter } from "./model-router.js";
+import { createMissionSupervisor } from "./mission-supervisor.js";
+import { PeerReviewSystem, defaultReviewExecutor } from "./peer-review.js";
 
 export interface GameMissionInput {
   goal: string;
@@ -110,6 +115,7 @@ export async function executeGameMission(
     stack: "phaser",
     template: input.templateId || "yagames-phaser-template",
     workspace: projectPath,
+    requiresVisualQa: workflowMode === "game",
   };
   
   const constraints: MissionConstraints = {
@@ -121,14 +127,16 @@ export async function executeGameMission(
   
   const mission = createMission(input.goal, context, constraints);
   
-  // 5. Create Planner
-  const planner: Planner = createPlanner({ 
-    maxDelegations: constraints.maxDelegations, 
-    allowedPipelines: constraints.allowedPipelines 
+  // 5. Create MissionPlanner (Phase 10: OpenCode-backed planning with deterministic fallback)
+  const plannerModel = new OpenCodePlannerModel({
+    projectDir: projectPath,
+  });
+  const planner: MissionPlanner = createMissionPlanner(plannerModel, {
+    maxDelegations: constraints.maxDelegations,
   });
   
-  // 6. Generate ExecutionPlan
-  const plan = planner.decompose(mission);
+  // 6. Generate ExecutionPlan via MissionPlanner
+  const plan = await planner.createPlan(mission);
 
   // Research mode: planning only — no execution
   if (workflowMode === "research") {
@@ -155,6 +163,26 @@ export async function executeGameMission(
   //    This matches the CLI pattern: all delegations go through runGoal()
   //    which dispatches to the appropriate agent based on pipeline type.
   const eventSink = new InMemoryEventSink();
+  const publisher = createMissionEventPublisher(eventSink);
+
+  // Phase 10: Wire Phase 8-9 systems
+  const modelRouter = createModelRouter();
+
+  const supervisor = createMissionSupervisor({
+    missionState: state,
+    eventSink,
+    publisher,
+    modelRouter,
+    replanner: planner,
+  });
+
+  const peerReview = new PeerReviewSystem();
+
+  const validation = {
+    buildCommand: "npm run build",
+    timeoutMs: 120_000,
+    maxRepairAttempts: 3,
+  };
 
   // Start Pixel Office reporting if configured
   const pixelOfficeReporter = createPixelOfficeReporter(eventSink);
@@ -177,6 +205,12 @@ export async function executeGameMission(
       auditor,
       eventSink,
       missionState: state,
+      modelRouter,
+      peerReview,
+      reviewExecutor: defaultReviewExecutor,
+      validation,
+      supervisor,
+      replanner: planner,
     });
 
     const completedMission = await orchestrator.executeMission(mission, plan);
@@ -219,6 +253,12 @@ export async function executeGameMission(
     missionState: state,
     visualQaAdapter,
     repairExecutor,
+    modelRouter,
+    peerReview,
+    reviewExecutor: defaultReviewExecutor,
+    validation,
+    supervisor,
+    replanner: planner,
   });
 
   const completedMission = await orchestrator.executeMission(mission, plan);

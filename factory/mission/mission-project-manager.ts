@@ -108,7 +108,7 @@ export class MissionAwareFactoryAdapter implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult> {
     const resolved = await this.config.projectManager.resolveProject(mission);
     this._lastResolved = resolved;
@@ -117,6 +117,7 @@ export class MissionAwareFactoryAdapter implements FactoryExecutionAdapter {
       baseDir: config.baseDir,
       project: resolved.projectPath,
       fromStep: config.fromStep,
+      model: config.model,
     });
   }
 
@@ -135,7 +136,7 @@ export interface InnerFactoryAdapter {
   runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult>;
 }
 
@@ -146,7 +147,7 @@ export class DefaultInnerFactoryAdapter implements InnerFactoryAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult> {
     await runGoal(
       delegation.description,
@@ -159,6 +160,7 @@ export class DefaultInnerFactoryAdapter implements InnerFactoryAdapter {
         stack: mission.context?.stack,
         template: mission.context?.template,
         workspace: mission.context?.workspace,
+        model: config.model,
       }
     );
 

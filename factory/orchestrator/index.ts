@@ -7,6 +7,22 @@ import {
   TemplateManager,
   resolveWorkspaceDir
 } from "../setup/project-setup.js";
+import {
+  createMission,
+  MissionContext,
+  MissionConstraints,
+} from "../mission/mission.js";
+import { MissionState } from "../mission/state.js";
+import { createPlanner } from "../mission/planner.js";
+import { MissionOrchestrator, RealFactoryAdapter } from "../mission/orchestrator.js";
+import { InMemoryEventSink, createMissionEventPublisher } from "../mission/events.js";
+import { createPixelOfficeReporter } from "../mission/pixel-office-reporter.js";
+import { createModelRouter } from "../mission/model-router.js";
+import { createMissionSupervisor } from "../mission/mission-supervisor.js";
+import { PeerReviewSystem, defaultReviewExecutor } from "../mission/peer-review.js";
+import { MissionProjectManager, MissionAwareFactoryAdapter } from "../mission/mission-project-manager.js";
+import { ProjectProvisioner } from "../mission/project-provisioner.js";
+import { DeterministicAuditor } from "../mission/orchestrator.js";
 
 function parseArgs(argv: string[]): {
   command: string;
@@ -271,20 +287,88 @@ async function main(): Promise<void> {
 
   console.log("\n🚀 Starting game-generation pipeline ...\n");
 
-  await runGoal(
-    goal,
+  // Phase 10: Route through mission-aware execution path
+  const missionId = `legacy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const context: MissionContext = {
+    projectId: path.basename(workspaceDir),
+    engine: goalEngine.kind,
+    stack: template.stack,
+    template: template.id,
+    workspace: workspaceDir,
+  };
+  const constraints: MissionConstraints = {
+    maxRepairs: 3,
+    maxDelegations: 20,
+    allowedPipelines: ["game", "engineering"],
+    requireApproval: false,
+  };
+  const mission = createMission(goal, context, constraints);
+
+  const planner = createPlanner({
+    maxDelegations: constraints.maxDelegations,
+    allowedPipelines: constraints.allowedPipelines,
+  });
+  const plan = planner.decompose(mission);
+
+  const state = new MissionState(baseDir, mission.id);
+  await state.init();
+  await state.setMission(mission);
+  await state.setPlan(plan);
+  for (const del of plan.delegations) {
+    await state.addDelegation(del);
+  }
+
+  const eventSink = new InMemoryEventSink();
+  const publisher = createMissionEventPublisher(eventSink);
+  const modelRouter = createModelRouter();
+  const supervisor = createMissionSupervisor({
+    missionState: state,
+    eventSink,
+    publisher,
+    modelRouter,
+  });
+  const peerReview = new PeerReviewSystem();
+
+  const pixelOfficeReporter = createPixelOfficeReporter(eventSink, console.log);
+  if (pixelOfficeReporter) {
+    pixelOfficeReporter.start();
+  }
+
+  const provisioner = new ProjectProvisioner({
     baseDir,
-    workspaceDir,
-    {
-      ...(dryRun ? { maxFixIterations: 5 } : {}),
-      engine: goalEngine.kind,
-      stack: template.stack,
-      template: template.id,
-      workspace: workspaceDir,
-      pipelineType: pipelineDef.type,
-      fromStep
-    }
-  );
+    templatesDir: path.join(baseDir, "templates"),
+    projectsDir: path.join(baseDir, "projects"),
+    allowedTemplateIds: ["yagames-phaser-template"],
+  });
+  const projectManager = new MissionProjectManager({ baseDir, provisioner });
+  const innerAdapter = new RealFactoryAdapter();
+  const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager }, innerAdapter);
+  const auditor = new DeterministicAuditor();
+
+  const orchestrator = new MissionOrchestrator({
+    maxRepairs: constraints.maxRepairs,
+    baseDir,
+    project: workspaceDir,
+    factoryAdapter,
+    auditor,
+    eventSink,
+    missionState: state,
+    modelRouter,
+    peerReview,
+    reviewExecutor: defaultReviewExecutor,
+    validation: {
+      buildCommand: "npm run build",
+      timeoutMs: 120_000,
+      maxRepairAttempts: 3,
+    },
+    supervisor,
+  });
+
+  try {
+    await orchestrator.executeMission(mission, plan);
+  } finally {
+    pixelOfficeReporter?.stop();
+  }
 }
 
 main().catch(error => {

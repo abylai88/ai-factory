@@ -253,10 +253,12 @@ export class TaskRunner {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       console.log(`\nATTEMPT ${attempt}/${this.maxAttempts}`);
 
-      const choice = chooseModel(
-        task.role as AgentRole,
-        failedModels
-      );
+      const choice = task.model
+        ? { model: task.model, reason: `Using pre-selected model ${task.model}` }
+        : chooseModel(
+          task.role as AgentRole,
+          failedModels
+        );
 
       const prompt = `
 You are an autonomous AI Factory agent.

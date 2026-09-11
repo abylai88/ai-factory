@@ -30,6 +30,7 @@ export interface PipelineRunnerConfig {
   template?: string;
   workspace?: string;
   fromStep?: string;
+  model?: string;
 }
 
 function isTestStep(step: PipelineStep): boolean {
@@ -107,6 +108,7 @@ export class PipelineRunner {
   private readonly project: string;
   private readonly maxFixIterations: number;
   private readonly fromStep?: string;
+  private readonly model?: string;
   private readonly setup: {
     engine?: string;
     stack?: string;
@@ -119,6 +121,7 @@ export class PipelineRunner {
     this.project = config.project;
     this.maxFixIterations = config.maxFixIterations ?? MAX_FIX_ITERATIONS;
     this.fromStep = config.fromStep;
+    this.model = config.model;
     this.executor =
       config.executor ?? new RealExecutor(config.baseDir, config.project);
     this.setup = {
@@ -172,7 +175,7 @@ IMPORTANT:
         `[${index + 1}/${total}] ${step.title}`,
         description,
         step.role,
-        undefined,
+        this.model,
         step.agent
       );
     }
@@ -550,6 +553,7 @@ export async function runGoal(
     workspace?: string;
     pipelineType?: PipelineType;
     fromStep?: string;
+    model?: string;
   }
 ): Promise<void> {
   const pipelineId = randomUUID().slice(0, 8);
@@ -566,7 +570,8 @@ export async function runGoal(
     stack: opts?.stack,
     template: opts?.template,
     workspace: opts?.workspace,
-    fromStep: opts?.fromStep
+    fromStep: opts?.fromStep,
+    model: opts?.model,
   });
 
   await runner.init();

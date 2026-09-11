@@ -36,7 +36,7 @@ import { isModelProviderFailure } from "./model-failure-classifier.js";
 import { randomUUID } from "node:crypto";
 
 export interface FactoryExecutionAdapter {
-  runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string }): Promise<AgentResult>;
+  runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string }): Promise<AgentResult>;
 }
 
 export interface Auditor {
@@ -1073,12 +1073,20 @@ export class MissionOrchestrator {
     const router = this.config.modelRouter;
     const maxFallbackAttempts = this.config.maxModelFallbackAttempts ?? 3;
 
-    const executeOnce = async (): Promise<AgentResult> => {
+    // Phase 10: Select initial model from Mission ModelRouter
+    let selectedModel: string | undefined;
+    if (router) {
+      const initialRoute = router.chooseModel({ delegation, role: delegation.role ?? "Developer", mission: this.currentMission! });
+      selectedModel = initialRoute.primary;
+    }
+
+    const executeOnce = async (modelOverride?: string): Promise<AgentResult> => {
       try {
         const adapterResult = await this.config.factoryAdapter.runDelegation(delegation, this.currentMission!, {
           baseDir: this.config.baseDir,
           project: this.config.project,
           fromStep: delegation.stepIds?.[0],
+          model: modelOverride ?? selectedModel,
         });
 
         const updatedDelegation = this.config.missionState.getDelegation(delegation.id);
@@ -1133,7 +1141,7 @@ export class MissionOrchestrator {
         // Phase 9: Notify supervisor of model fallback
         this.config.supervisor?.observeModelFallback(delegation.id, nextModel);
 
-        agentResult = await executeOnce();
+        agentResult = await executeOnce(nextModel);
         if (!isModelProviderFailure(agentResult) || agentResult.status !== "failed") {
           break;
         }
@@ -1925,7 +1933,7 @@ export class DeterministicAuditor implements Auditor {
 }
 
 export class RealFactoryAdapter implements FactoryExecutionAdapter {
-  async runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string }): Promise<AgentResult> {
+  async runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string }): Promise<AgentResult> {
     await runGoal(
       delegation.description,
       config.baseDir,
@@ -1937,6 +1945,7 @@ export class RealFactoryAdapter implements FactoryExecutionAdapter {
         stack: mission.context?.stack,
         template: mission.context?.template,
         workspace: mission.context?.workspace,
+        model: config.model,
       }
     );
     return {
@@ -1964,7 +1973,7 @@ export class ReadOnlyFactoryAdapter implements FactoryExecutionAdapter {
     this.config = config ?? {};
   }
 
-  async runDelegation(delegation: Delegation, _mission: Mission, config: { baseDir: string; project: string; fromStep?: string }): Promise<AgentResult> {
+  async runDelegation(delegation: Delegation, _mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string }): Promise<AgentResult> {
     const agent = this.config.agent ?? DEFAULT_READ_ONLY_AGENT;
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_READ_ONLY_TIMEOUT_MS;
 
@@ -1995,7 +2004,7 @@ IMPORTANT: This is a READ-ONLY mission. Do NOT modify anything.
     const startTime = Date.now();
 
     try {
-      const result = await this.runOpenCode(agent, prompt, config.project, timeoutMs);
+      const result = await this.runOpenCode(agent, prompt, config.project, timeoutMs, config.model);
       const durationMs = Date.now() - startTime;
 
       if (result.timedOut) {
@@ -2043,20 +2052,22 @@ IMPORTANT: This is a READ-ONLY mission. Do NOT modify anything.
     agent: string,
     prompt: string,
     project: string,
-    timeoutMs: number
+    timeoutMs: number,
+    model?: string
   ): Promise<{ code: number; output: string; timedOut: boolean }> {
     return new Promise((resolve) => {
       let output = "";
       let settled = false;
 
+      const args = ["run", "--agent", agent];
+      if (model) {
+        args.push("-m", model);
+      }
+      args.push(prompt);
+
       const child = pty.spawn(
         "/home/asila/.opencode/bin/opencode",
-        [
-          "run",
-          "--agent",
-          agent,
-          prompt,
-        ],
+        args,
         {
           name: "xterm-256color",
           cols: 120,

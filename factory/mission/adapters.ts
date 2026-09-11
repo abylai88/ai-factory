@@ -105,7 +105,7 @@ export class ControlledCodingAdapter implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult> {
     const startTime = Date.now();
     const metadata = extractMetadata(delegation);
@@ -230,7 +230,7 @@ export class ControlledBuildAdapter implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult> {
     const startTime = Date.now();
     const metadata = extractMetadata(delegation);
@@ -335,7 +335,7 @@ export class CompositeCodingBuildAdapter implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult> {
     const metadata = extractMetadata(delegation);
 

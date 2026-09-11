@@ -23,6 +23,11 @@ import { MissionProjectManager, MissionAwareFactoryAdapter } from "./mission-pro
 import { classifyDiagnosis, generateRepairPlan } from "./diagnosis.js";
 import { auditRepairPlan, isRepairPlanSafe } from "./repair-plan-audit.js";
 import type { DiagnosisInput } from "./mission.js";
+import { OpenCodePlannerModel } from "./opencode-planner-model.js";
+import { MissionPlanner, createMissionPlanner } from "./mission-planner.js";
+import { createModelRouter } from "./model-router.js";
+import { createMissionSupervisor } from "./mission-supervisor.js";
+import { PeerReviewSystem, defaultReviewExecutor } from "./peer-review.js";
 
 const ALLOWED_TEMPLATES = ["yagames-phaser-template"] as const;
 
@@ -383,8 +388,13 @@ async function main(): Promise<void> {
     const readOnlyPlanner = createReadOnlyPlanner({ maxDelegations: 1 });
     plan = readOnlyPlanner.decompose(mission);
   } else {
-    const planner = createPlanner({ maxDelegations: constraints.maxDelegations, allowedPipelines: constraints.allowedPipelines });
-    plan = planner.decompose(mission);
+    const plannerModel = new OpenCodePlannerModel({
+      projectDir: workspaceDir,
+    });
+    const missionPlanner = createMissionPlanner(plannerModel, {
+      maxDelegations: constraints.maxDelegations,
+    });
+    plan = await missionPlanner.createPlan(mission);
   }
 
   console.log("\n📋 EXECUTION PLAN:");
@@ -429,6 +439,25 @@ async function main(): Promise<void> {
   }
 
   const eventSink = new InMemoryEventSink();
+  const publisher = createMissionEventPublisher(eventSink);
+
+  // Phase 10: Wire Phase 8-9 systems
+  const modelRouter = createModelRouter();
+
+  const supervisor = createMissionSupervisor({
+    missionState,
+    eventSink,
+    publisher,
+    modelRouter,
+  });
+
+  const peerReview = new PeerReviewSystem();
+
+  const validation = {
+    buildCommand: "npm run build",
+    timeoutMs: 120_000,
+    maxRepairAttempts: 3,
+  };
 
   // Start Pixel Office reporting if configured
   const pixelOfficeReporter = createPixelOfficeReporter(eventSink, console.log);
@@ -453,6 +482,11 @@ async function main(): Promise<void> {
     auditor,
     eventSink,
     missionState,
+    modelRouter,
+    peerReview,
+    reviewExecutor: defaultReviewExecutor,
+    validation,
+    supervisor,
   });
 
   console.log("\n🚀 Starting mission execution...\n");

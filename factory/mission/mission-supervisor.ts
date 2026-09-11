@@ -77,7 +77,7 @@ export interface RecoveryContext {
 const DEFAULT_CONFIG: Omit<SupervisorConfig, "missionState" | "eventSink" | "publisher"> = {
   maxRecoveryAttempts: 3,
   maxStuckRecoveries: 2,
-  maxDelegationDurationMs: 5 * 60 * 1000,
+  maxDelegationDurationMs: 300_000,
   stuckDetectionIntervalMs: 30 * 1000,
   maxReplanAttempts: 2,
   maxModelFallbackAttempts: 3,
@@ -112,7 +112,7 @@ export class MissionSupervisor {
   private totalModelFallbackAttempts = 0;
 
   constructor(config: SupervisorConfig) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.config = { ...DEFAULT_CONFIG, ...config } as SupervisorConfig;
   }
 
   // ── Lifecycle Observation ──────────────────────────────────
@@ -610,7 +610,7 @@ export class MissionSupervisor {
 // ── Factory ────────────────────────────────────────────────
 
 export function createMissionSupervisor(
-  config: SupervisorConfig,
+  config: Partial<SupervisorConfig> & Pick<SupervisorConfig, "missionState" | "eventSink" | "publisher">,
 ): MissionSupervisor {
-  return new MissionSupervisor(config);
+  return new MissionSupervisor(config as SupervisorConfig);
 }
