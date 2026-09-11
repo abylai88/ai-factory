@@ -1,6 +1,30 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 
+export const AgentRoleSchema = z.enum([
+  "Manager",
+  "Researcher",
+  "Developer",
+  "Designer",
+  "QA",
+  "Repair",
+  "Architect",
+]);
+export type AgentRole = z.infer<typeof AgentRoleSchema>;
+
+export const DelegationArtifactSchema = z.object({
+  id: z.string(),
+  delegationId: z.string(),
+  type: z.enum(["file", "research", "design", "code", "test", "report"]),
+  path: z.string().optional(),
+  title: z.string(),
+  summary: z.string(),
+  createdByRole: AgentRoleSchema,
+  createdAt: z.string(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+export type DelegationArtifact = z.infer<typeof DelegationArtifactSchema>;
+
 export const MissionStatusSchema = z.enum([
   "draft",
   "planned",
@@ -225,6 +249,14 @@ export const DelegationSchema = z.object({
   pipelineId: z.string().optional(),
   result: z.string().optional(),
   error: z.string().optional(),
+  // Phase 8: First-class role fields
+  role: AgentRoleSchema.optional(),
+  assignedAgent: z.string().optional(),
+  reviewerRole: AgentRoleSchema.optional(),
+  requiresReview: z.boolean().optional(),
+  retryOf: z.string().optional(),
+  inputs: z.array(DelegationArtifactSchema).optional(),
+  outputs: z.array(DelegationArtifactSchema).optional(),
 });
 export type Delegation = z.infer<typeof DelegationSchema>;
 
@@ -329,6 +361,19 @@ export const MissionEventSchema = z.object({
     "mission.repair.started",
     "mission.repair.completed",
     "mission.repair.failed",
+    "delegation.validation.started",
+    "delegation.validation.passed",
+    "delegation.validation.failed",
+    "delegation.retry.started",
+    "delegation.triage",
+    // Phase 9: Supervisor events
+    "mission.supervisor.started",
+    "mission.supervisor.decision",
+    "delegation.stuck",
+    "delegation.recovery.started",
+    "delegation.recovery.completed",
+    "delegation.recovery.failed",
+    "delegation.escalated",
   ]),
   payload: z.record(z.string(), z.unknown()),
 });
@@ -423,6 +468,14 @@ export function createDelegation(
     dependsOn?: string[];
     parallelizable?: boolean;
     acceptanceCriteria?: string[];
+    // Phase 8: First-class role fields
+    role?: AgentRole;
+    assignedAgent?: string;
+    reviewerRole?: AgentRole;
+    requiresReview?: boolean;
+    retryOf?: string;
+    inputs?: DelegationArtifact[];
+    outputs?: DelegationArtifact[];
   }
 ): Delegation {
   return {
@@ -438,6 +491,13 @@ export function createDelegation(
     acceptanceCriteria: options?.acceptanceCriteria ?? [],
     status: "queued",
     createdAt: new Date().toISOString(),
+    role: options?.role,
+    assignedAgent: options?.assignedAgent,
+    reviewerRole: options?.reviewerRole,
+    requiresReview: options?.requiresReview ?? false,
+    retryOf: options?.retryOf,
+    inputs: options?.inputs,
+    outputs: options?.outputs,
   };
 }
 

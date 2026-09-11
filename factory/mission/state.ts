@@ -78,6 +78,20 @@ export class MissionState {
   private diagnosis: Diagnosis | null = null;
   private diagnosisRepairPlan: DiagnosisRepairPlan | null = null;
   private repairCycleCount = 0;
+  private supervisorDecisions: Array<{
+    id: string;
+    type: string;
+    reason: string;
+    context: string;
+    failureCount: number;
+    recoveryCount: number;
+    escalationLevel: number;
+    result?: string;
+  }> = [];
+  private escalationEvents: Array<{
+    delegationId: string;
+    reason: string;
+  }> = [];
 
   constructor(baseDir: string, missionId: string) {
     const sanitized = sanitizeMissionId(missionId);
@@ -254,11 +268,33 @@ export class MissionState {
             actionsFailed: payload.actionsFailed,
           };
         }
-        break;
-      case "mission.repair.failed":
+        case "mission.repair.failed":
         this.mission.status = "repairing";
         this.repairCycleCount = (payload.cycle as number) ?? this.repairCycleCount;
         this.mission.repairCycleCount = this.repairCycleCount;
+        break;
+      case "mission.supervisor.decision":
+        // Persist supervisor decision for audit trail
+        if (!this.supervisorDecisions) this.supervisorDecisions = [];
+        this.supervisorDecisions.push({
+          id: String(payload.delegationId),
+          type: String(payload.decisionType),
+          reason: String(payload.reason),
+          context: String(payload.context),
+          failureCount: Number(payload.failureCount),
+          recoveryCount: Number(payload.recoveryCount),
+          escalationLevel: Number(payload.escalationLevel),
+          result: String(payload.result),
+        });
+        break;
+
+      case "delegation.escalated":
+        // Persist escalation event for audit trail
+        if (!this.escalationEvents) this.escalationEvents = [];
+        this.escalationEvents.push({
+          delegationId: String(payload.delegationId),
+          reason: String(payload.reason),
+        });
         break;
     }
 

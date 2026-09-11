@@ -1,0 +1,973 @@
+{
+  "mission": {
+    "id": "mission-9e00ef5f",
+    "goal": "Build a simple game",
+    "context": {
+      "projectId": "proj-4a401e09",
+      "engine": "web",
+      "stack": "phaser",
+      "template": "yagames-phaser-template",
+      "workspace": "/home/asila/game-factory/ai-factory/projects/proj-4a401e09",
+      "requiresVisualQa": true
+    },
+    "constraints": {
+      "maxRepairs": 3,
+      "maxDelegations": 20,
+      "allowedPipelines": [
+        "game",
+        "engineering"
+      ],
+      "requireApproval": false
+    },
+    "status": "failed",
+    "createdAt": "2026-08-31T15:58:03.155Z",
+    "updatedAt": "2026-08-31T15:58:03.227Z",
+    "planId": "plan-81afb317",
+    "currentDelegationIndex": 0,
+    "repairCycleCount": 0
+  },
+  "plan": {
+    "id": "plan-81afb317",
+    "missionId": "mission-9e00ef5f",
+    "objectives": [
+      {
+        "id": "obj-1",
+        "title": "Research & Concept",
+        "description": "Analyze market, competitors, and define game concept",
+        "delegations": [
+          "market",
+          "competitor",
+          "idea"
+        ]
+      },
+      {
+        "id": "obj-2",
+        "title": "Design & Architecture",
+        "description": "Create GDD, gameplay design, technical design, and architecture",
+        "delegations": [
+          "director",
+          "gameplay",
+          "design",
+          "architect"
+        ]
+      },
+      {
+        "id": "obj-3",
+        "title": "Implementation",
+        "description": "Implement game code and content",
+        "delegations": [
+          "implementation",
+          "content",
+          "monetization"
+        ]
+      },
+      {
+        "id": "obj-4",
+        "title": "Validation & Release",
+        "description": "Test, review, build, and prepare release",
+        "delegations": [
+          "test",
+          "review",
+          "build",
+          "release"
+        ]
+      }
+    ],
+    "delegations": [
+      {
+        "id": "del-19588a02",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-1",
+        "title": "[1] Market analysis",
+        "description": "Проанализируй целевую аудиторию, размер рынка, тренды и бенчмарки монетизации для жанра这个游戏. Определи платформу и её ограничения.",
+        "pipelineType": "game",
+        "stepIds": [
+          "market"
+        ],
+        "dependsOn": [],
+        "parallelizable": true,
+        "acceptanceCriteria": [
+          "Target audience defined",
+          "Market size estimated",
+          "Monetization benchmarks identified"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-7d640c6f",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-1",
+        "title": "[2] Competitor analysis",
+        "description": "Исследуй прямых и косвенных конкурентов. Определи их сильные и слабые стороны, возможности для дифференциации и приоритеты фич.",
+        "pipelineType": "game",
+        "stepIds": [
+          "competitor"
+        ],
+        "dependsOn": [
+          "del-19588a02"
+        ],
+        "parallelizable": true,
+        "acceptanceCriteria": [
+          "Top 5 competitors analyzed",
+          "Differentiation opportunities identified"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-e9cc0a59",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-1",
+        "title": "[3] Game concept",
+        "description": "На основе анализа рынка и конкурентов сгенерируй конкретную игровую концепцию: USP, базовый игровой цикл, целевой опыт игрока и ключевые фичи.",
+        "pipelineType": "game",
+        "stepIds": [
+          "idea"
+        ],
+        "dependsOn": [
+          "del-7d640c6f"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Unique selling proposition defined",
+          "Core game loop described",
+          "Key features listed"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-dd493457",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-2",
+        "title": "[4] Game design document",
+        "description": "Разработай подробный GDD: видение, механики, системы, прогрессия, UX-поток, структура контента и приоритеты продакшена. Определи архитектуру сцен Phaser.",
+        "pipelineType": "game",
+        "stepIds": [
+          "director"
+        ],
+        "dependsOn": [
+          "del-e9cc0a59"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "GDD created with vision, mechanics, systems",
+          "Phaser scene structure defined",
+          "Production priorities set"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-ac70e082",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-2",
+        "title": "[5] Gameplay mechanics design",
+        "description": "Детально проработай геймплейные механики: физику, тюнинг, feedback-системы, juice-эффекты, обработку ввода и кривую сложности.",
+        "pipelineType": "game",
+        "stepIds": [
+          "gameplay"
+        ],
+        "dependsOn": [
+          "del-dd493457"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Physics and tuning documented",
+          "Feedback systems specified",
+          "Difficulty curve defined"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-7556587f",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-2",
+        "title": "[6] Technical design",
+        "description": "На основе GDD и gameplay-дизайна разработай технический план: конкретные изменения в файлах, инкременты, критерии приёмки. Код не изменяй.",
+        "pipelineType": "game",
+        "stepIds": [
+          "design"
+        ],
+        "dependsOn": [
+          "del-ac70e082"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Technical plan with file changes",
+          "Solution designed",
+          "Acceptance criteria defined",
+          "No code modified"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-b5a81e63",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-2",
+        "title": "[7] Technical architecture",
+        "description": "Спроектируй техническую архитектуру: модульную структуру, управление состоянием, потоки данных, конфигурацию сборки. Определи риски.",
+        "pipelineType": "game",
+        "stepIds": [
+          "architect"
+        ],
+        "dependsOn": [
+          "del-7556587f"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Module structure defined",
+          "State management approach chosen",
+          "Build configuration specified",
+          "Risks identified"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-f76d5721",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-3",
+        "title": "[8] Implement game",
+        "description": "Реализуй игровой код на TypeScript/Phaser 3 по архитектурному плану. Следуй конвенциям проекта. Проверяй сборку и typecheck после изменений.",
+        "pipelineType": "game",
+        "stepIds": [
+          "implementation"
+        ],
+        "dependsOn": [
+          "del-b5a81e63"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Code compiles without errors",
+          "TypeScript passes",
+          "Game runs without runtime errors"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-180c0c6c",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-3",
+        "title": "[9] Create game content",
+        "description": "Создай данные уровней, конфигурации, строки интерфейса, структуры данных. Обеспечь data-driven подход и интеграцию с игровой логикой.",
+        "pipelineType": "game",
+        "stepIds": [
+          "content"
+        ],
+        "dependsOn": [
+          "del-f76d5721"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Level data created",
+          "Configurations integrated",
+          "Data-driven approach followed"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-3066bc4c",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-3",
+        "title": "[10] Monetization design",
+        "description": "Разработай стратегию монетизации: размещение рекламы, вознаграждения, IAP, интеграция с Yandex Games SDK. Определи KPI-цели.",
+        "pipelineType": "game",
+        "stepIds": [
+          "monetization"
+        ],
+        "dependsOn": [
+          "del-180c0c6c"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Ad placement strategy defined",
+          "Reward system designed",
+          "Yandex Games SDK integration planned",
+          "KPIs set"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-64163f30",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-4",
+        "title": "[11] Test implementation",
+        "description": "Проверь результат: запусти сборку, typecheck, протестируй игровой flow. Ищи regressions, runtime-проблемы и ошибки. Не исправляй код.",
+        "pipelineType": "game",
+        "stepIds": [
+          "test"
+        ],
+        "dependsOn": [
+          "del-3066bc4c"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Build succeeds",
+          "TypeCheck passes",
+          "Gameplay flow tested",
+          "No critical bugs found"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-d20b8711",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-4",
+        "title": "[12] Review final result",
+        "description": "Независимо оцени итог: соответствие цели, качество, тесты, регрессии. Дай вердикт: release / release-with-fixes / block.",
+        "pipelineType": "game",
+        "stepIds": [
+          "review"
+        ],
+        "dependsOn": [
+          "del-64163f30"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Goal alignment verified",
+          "Code quality assessed",
+          "Regression check passed",
+          "Verdict: release / release-with-fixes / block"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-15d832f8",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-4",
+        "title": "[13] Build production artifact",
+        "description": "Запусти production build, убедись что проект собирается без ошибок. Исправь только проблемы сборки.",
+        "pipelineType": "game",
+        "stepIds": [
+          "build"
+        ],
+        "dependsOn": [
+          "del-d20b8711"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Production build succeeds",
+          "No build errors",
+          "Artifact created"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      },
+      {
+        "id": "del-f3774b7f",
+        "missionId": "mission-9e00ef5f",
+        "objectiveId": "obj-4",
+        "title": "[14] Prepare release",
+        "description": "Проверь финальное состояние: сборка, тесты, отсутствие регрессий. Оформи итоговый отчёт по релизу.",
+        "pipelineType": "game",
+        "stepIds": [
+          "release"
+        ],
+        "dependsOn": [
+          "del-15d832f8"
+        ],
+        "parallelizable": false,
+        "acceptanceCriteria": [
+          "Final build verified",
+          "Tests pass",
+          "Release report generated"
+        ],
+        "status": "queued",
+        "createdAt": "2026-08-31T15:58:03.158Z"
+      }
+    ],
+    "risks": [
+      {
+        "id": "risk-1",
+        "description": "Scope creep during implementation",
+        "severity": "medium",
+        "mitigation": "Strict adherence to GDD"
+      },
+      {
+        "id": "risk-2",
+        "description": "Technical debt from rapid prototyping",
+        "severity": "low",
+        "mitigation": "Regular code reviews"
+      }
+    ],
+    "validationGates": [
+      {
+        "id": "gate-del-19588a02",
+        "delegationId": "del-19588a02",
+        "criteria": [
+          "Target audience defined",
+          "Market size estimated",
+          "Monetization benchmarks identified"
+        ]
+      },
+      {
+        "id": "gate-del-7d640c6f",
+        "delegationId": "del-7d640c6f",
+        "criteria": [
+          "Top 5 competitors analyzed",
+          "Differentiation opportunities identified"
+        ]
+      },
+      {
+        "id": "gate-del-e9cc0a59",
+        "delegationId": "del-e9cc0a59",
+        "criteria": [
+          "Unique selling proposition defined",
+          "Core game loop described",
+          "Key features listed"
+        ]
+      },
+      {
+        "id": "gate-del-dd493457",
+        "delegationId": "del-dd493457",
+        "criteria": [
+          "GDD created with vision, mechanics, systems",
+          "Phaser scene structure defined",
+          "Production priorities set"
+        ]
+      },
+      {
+        "id": "gate-del-ac70e082",
+        "delegationId": "del-ac70e082",
+        "criteria": [
+          "Physics and tuning documented",
+          "Feedback systems specified",
+          "Difficulty curve defined"
+        ]
+      },
+      {
+        "id": "gate-del-7556587f",
+        "delegationId": "del-7556587f",
+        "criteria": [
+          "Technical plan with file changes",
+          "Solution designed",
+          "Acceptance criteria defined",
+          "No code modified"
+        ]
+      },
+      {
+        "id": "gate-del-b5a81e63",
+        "delegationId": "del-b5a81e63",
+        "criteria": [
+          "Module structure defined",
+          "State management approach chosen",
+          "Build configuration specified",
+          "Risks identified"
+        ]
+      },
+      {
+        "id": "gate-del-f76d5721",
+        "delegationId": "del-f76d5721",
+        "criteria": [
+          "Code compiles without errors",
+          "TypeScript passes",
+          "Game runs without runtime errors"
+        ]
+      },
+      {
+        "id": "gate-del-180c0c6c",
+        "delegationId": "del-180c0c6c",
+        "criteria": [
+          "Level data created",
+          "Configurations integrated",
+          "Data-driven approach followed"
+        ]
+      },
+      {
+        "id": "gate-del-3066bc4c",
+        "delegationId": "del-3066bc4c",
+        "criteria": [
+          "Ad placement strategy defined",
+          "Reward system designed",
+          "Yandex Games SDK integration planned",
+          "KPIs set"
+        ]
+      },
+      {
+        "id": "gate-del-64163f30",
+        "delegationId": "del-64163f30",
+        "criteria": [
+          "Build succeeds",
+          "TypeCheck passes",
+          "Gameplay flow tested",
+          "No critical bugs found"
+        ]
+      },
+      {
+        "id": "gate-del-d20b8711",
+        "delegationId": "del-d20b8711",
+        "criteria": [
+          "Goal alignment verified",
+          "Code quality assessed",
+          "Regression check passed",
+          "Verdict: release / release-with-fixes / block"
+        ]
+      },
+      {
+        "id": "gate-del-15d832f8",
+        "delegationId": "del-15d832f8",
+        "criteria": [
+          "Production build succeeds",
+          "No build errors",
+          "Artifact created"
+        ]
+      },
+      {
+        "id": "gate-del-f3774b7f",
+        "delegationId": "del-f3774b7f",
+        "criteria": [
+          "Final build verified",
+          "Tests pass",
+          "Release report generated"
+        ]
+      }
+    ],
+    "createdAt": "2026-08-31T15:58:03.158Z"
+  },
+  "delegations": [
+    {
+      "id": "del-19588a02",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-1",
+      "title": "[1] Market analysis",
+      "description": "Проанализируй целевую аудиторию, размер рынка, тренды и бенчмарки монетизации для жанра这个游戏. Определи платформу и её ограничения.",
+      "pipelineType": "game",
+      "stepIds": [
+        "market"
+      ],
+      "dependsOn": [],
+      "parallelizable": true,
+      "acceptanceCriteria": [
+        "Target audience defined",
+        "Market size estimated",
+        "Monetization benchmarks identified"
+      ],
+      "status": "failed",
+      "createdAt": "2026-08-31T15:58:03.158Z",
+      "startedAt": "2026-08-31T15:58:03.197Z",
+      "finishedAt": "2026-08-31T15:58:03.199Z",
+      "pipelineId": "",
+      "result": "",
+      "error": "No coding operation specified in delegation metadata"
+    },
+    {
+      "id": "del-7d640c6f",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-1",
+      "title": "[2] Competitor analysis",
+      "description": "Исследуй прямых и косвенных конкурентов. Определи их сильные и слабые стороны, возможности для дифференциации и приоритеты фич.",
+      "pipelineType": "game",
+      "stepIds": [
+        "competitor"
+      ],
+      "dependsOn": [
+        "del-19588a02"
+      ],
+      "parallelizable": true,
+      "acceptanceCriteria": [
+        "Top 5 competitors analyzed",
+        "Differentiation opportunities identified"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-e9cc0a59",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-1",
+      "title": "[3] Game concept",
+      "description": "На основе анализа рынка и конкурентов сгенерируй конкретную игровую концепцию: USP, базовый игровой цикл, целевой опыт игрока и ключевые фичи.",
+      "pipelineType": "game",
+      "stepIds": [
+        "idea"
+      ],
+      "dependsOn": [
+        "del-7d640c6f"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Unique selling proposition defined",
+        "Core game loop described",
+        "Key features listed"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-dd493457",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-2",
+      "title": "[4] Game design document",
+      "description": "Разработай подробный GDD: видение, механики, системы, прогрессия, UX-поток, структура контента и приоритеты продакшена. Определи архитектуру сцен Phaser.",
+      "pipelineType": "game",
+      "stepIds": [
+        "director"
+      ],
+      "dependsOn": [
+        "del-e9cc0a59"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "GDD created with vision, mechanics, systems",
+        "Phaser scene structure defined",
+        "Production priorities set"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-ac70e082",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-2",
+      "title": "[5] Gameplay mechanics design",
+      "description": "Детально проработай геймплейные механики: физику, тюнинг, feedback-системы, juice-эффекты, обработку ввода и кривую сложности.",
+      "pipelineType": "game",
+      "stepIds": [
+        "gameplay"
+      ],
+      "dependsOn": [
+        "del-dd493457"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Physics and tuning documented",
+        "Feedback systems specified",
+        "Difficulty curve defined"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-7556587f",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-2",
+      "title": "[6] Technical design",
+      "description": "На основе GDD и gameplay-дизайна разработай технический план: конкретные изменения в файлах, инкременты, критерии приёмки. Код не изменяй.",
+      "pipelineType": "game",
+      "stepIds": [
+        "design"
+      ],
+      "dependsOn": [
+        "del-ac70e082"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Technical plan with file changes",
+        "Solution designed",
+        "Acceptance criteria defined",
+        "No code modified"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-b5a81e63",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-2",
+      "title": "[7] Technical architecture",
+      "description": "Спроектируй техническую архитектуру: модульную структуру, управление состоянием, потоки данных, конфигурацию сборки. Определи риски.",
+      "pipelineType": "game",
+      "stepIds": [
+        "architect"
+      ],
+      "dependsOn": [
+        "del-7556587f"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Module structure defined",
+        "State management approach chosen",
+        "Build configuration specified",
+        "Risks identified"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-f76d5721",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-3",
+      "title": "[8] Implement game",
+      "description": "Реализуй игровой код на TypeScript/Phaser 3 по архитектурному плану. Следуй конвенциям проекта. Проверяй сборку и typecheck после изменений.",
+      "pipelineType": "game",
+      "stepIds": [
+        "implementation"
+      ],
+      "dependsOn": [
+        "del-b5a81e63"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Code compiles without errors",
+        "TypeScript passes",
+        "Game runs without runtime errors"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-180c0c6c",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-3",
+      "title": "[9] Create game content",
+      "description": "Создай данные уровней, конфигурации, строки интерфейса, структуры данных. Обеспечь data-driven подход и интеграцию с игровой логикой.",
+      "pipelineType": "game",
+      "stepIds": [
+        "content"
+      ],
+      "dependsOn": [
+        "del-f76d5721"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Level data created",
+        "Configurations integrated",
+        "Data-driven approach followed"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-3066bc4c",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-3",
+      "title": "[10] Monetization design",
+      "description": "Разработай стратегию монетизации: размещение рекламы, вознаграждения, IAP, интеграция с Yandex Games SDK. Определи KPI-цели.",
+      "pipelineType": "game",
+      "stepIds": [
+        "monetization"
+      ],
+      "dependsOn": [
+        "del-180c0c6c"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Ad placement strategy defined",
+        "Reward system designed",
+        "Yandex Games SDK integration planned",
+        "KPIs set"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-64163f30",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-4",
+      "title": "[11] Test implementation",
+      "description": "Проверь результат: запусти сборку, typecheck, протестируй игровой flow. Ищи regressions, runtime-проблемы и ошибки. Не исправляй код.",
+      "pipelineType": "game",
+      "stepIds": [
+        "test"
+      ],
+      "dependsOn": [
+        "del-3066bc4c"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Build succeeds",
+        "TypeCheck passes",
+        "Gameplay flow tested",
+        "No critical bugs found"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-d20b8711",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-4",
+      "title": "[12] Review final result",
+      "description": "Независимо оцени итог: соответствие цели, качество, тесты, регрессии. Дай вердикт: release / release-with-fixes / block.",
+      "pipelineType": "game",
+      "stepIds": [
+        "review"
+      ],
+      "dependsOn": [
+        "del-64163f30"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Goal alignment verified",
+        "Code quality assessed",
+        "Regression check passed",
+        "Verdict: release / release-with-fixes / block"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-15d832f8",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-4",
+      "title": "[13] Build production artifact",
+      "description": "Запусти production build, убедись что проект собирается без ошибок. Исправь только проблемы сборки.",
+      "pipelineType": "game",
+      "stepIds": [
+        "build"
+      ],
+      "dependsOn": [
+        "del-d20b8711"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Production build succeeds",
+        "No build errors",
+        "Artifact created"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "del-f3774b7f",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-4",
+      "title": "[14] Prepare release",
+      "description": "Проверь финальное состояние: сборка, тесты, отсутствие регрессий. Оформи итоговый отчёт по релизу.",
+      "pipelineType": "game",
+      "stepIds": [
+        "release"
+      ],
+      "dependsOn": [
+        "del-15d832f8"
+      ],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Final build verified",
+        "Tests pass",
+        "Release report generated"
+      ],
+      "status": "queued",
+      "createdAt": "2026-08-31T15:58:03.158Z"
+    },
+    {
+      "id": "repair-del-19588a02-1",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-1",
+      "title": "[REPAIR 1/3] [1] Market analysis",
+      "description": "Fix the failure in [1] Market analysis\n\nFOCUS AREAS:\n- Error resolution\n- Verify fix\n\nITERATION: 1/3",
+      "pipelineType": "game",
+      "dependsOn": [],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Target audience defined",
+        "Market size estimated",
+        "Monetization benchmarks identified",
+        "Repair verified by auditor"
+      ],
+      "status": "failed",
+      "createdAt": "2026-08-31T15:58:03.208Z",
+      "startedAt": "2026-08-31T15:58:03.211Z",
+      "finishedAt": "2026-08-31T15:58:03.213Z",
+      "pipelineId": "",
+      "result": "",
+      "error": "No coding operation specified in delegation metadata"
+    },
+    {
+      "id": "repair-del-19588a02-2",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-1",
+      "title": "[REPAIR 2/3] [1] Market analysis",
+      "description": "Fix the failure in [1] Market analysis\n\nFOCUS AREAS:\n- Error resolution\n- Verify fix\n\nITERATION: 2/3",
+      "pipelineType": "game",
+      "dependsOn": [],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Target audience defined",
+        "Market size estimated",
+        "Monetization benchmarks identified",
+        "Repair verified by auditor"
+      ],
+      "status": "failed",
+      "createdAt": "2026-08-31T15:58:03.215Z",
+      "startedAt": "2026-08-31T15:58:03.218Z",
+      "finishedAt": "2026-08-31T15:58:03.219Z",
+      "pipelineId": "",
+      "result": "",
+      "error": "No coding operation specified in delegation metadata"
+    },
+    {
+      "id": "repair-del-19588a02-3",
+      "missionId": "mission-9e00ef5f",
+      "objectiveId": "obj-1",
+      "title": "[REPAIR 3/3] [1] Market analysis",
+      "description": "Fix the failure in [1] Market analysis\n\nFOCUS AREAS:\n- Error resolution\n- Verify fix\n\nITERATION: 3/3",
+      "pipelineType": "game",
+      "dependsOn": [],
+      "parallelizable": false,
+      "acceptanceCriteria": [
+        "Target audience defined",
+        "Market size estimated",
+        "Monetization benchmarks identified",
+        "Repair verified by auditor"
+      ],
+      "status": "failed",
+      "createdAt": "2026-08-31T15:58:03.221Z",
+      "startedAt": "2026-08-31T15:58:03.223Z",
+      "finishedAt": "2026-08-31T15:58:03.225Z",
+      "pipelineId": "",
+      "result": "",
+      "error": "No coding operation specified in delegation metadata"
+    }
+  ],
+  "auditResults": {
+    "del-19588a02": {
+      "delegationId": "del-19588a02",
+      "status": "FAIL",
+      "summary": "Delegation \"[1] Market analysis\" failed: No coding operation specified in delegation metadata",
+      "findings": [
+        "Execution failed: No coding operation specified in delegation metadata"
+      ],
+      "acceptanceCriteriaResults": [
+        {
+          "criterion": "Target audience defined",
+          "passed": false,
+          "evidence": "No coding operation specified in delegation metadata"
+        },
+        {
+          "criterion": "Market size estimated",
+          "passed": false,
+          "evidence": "No coding operation specified in delegation metadata"
+        },
+        {
+          "criterion": "Monetization benchmarks identified",
+          "passed": false,
+          "evidence": "No coding operation specified in delegation metadata"
+        }
+      ],
+      "recommendedRepair": {
+        "description": "Fix the failure in [1] Market analysis",
+        "focusAreas": [
+          "Error resolution",
+          "Verify fix"
+        ]
+      }
+    }
+  },
+  "repairPlans": {
+    "del-19588a02": {
+      "delegationId": "del-19588a02",
+      "description": "Fix the failure in [1] Market analysis",
+      "focusAreas": [
+        "Error resolution",
+        "Verify fix"
+      ],
+      "maxIterations": 3,
+      "iteration": 3
+    }
+  },
+  "currentDelegationIndex": 0,
+  "diagnosis": null,
+  "diagnosisRepairPlan": null,
+  "repairCycleCount": 0,
+  "updatedAt": "2026-08-31T15:58:03.227Z"
+}

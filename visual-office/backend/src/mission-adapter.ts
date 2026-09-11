@@ -14,6 +14,7 @@ import {
 } from "../../../factory/mission/mission.js";
 import { MissionState, MissionSnapshot } from "../../../factory/mission/state.js";
 import { InMemoryEventSink } from "../../../factory/mission/events.js";
+import { createPixelOfficeReporter, PixelOfficeReporter } from "../../../factory/mission/pixel-office-reporter.js";
 import { Planner, createPlanner } from "../../../factory/mission/planner.js";
 import { ProjectProvisioner } from "../../../factory/mission/project-provisioner.js";
 import type { EventBus } from "./events.js";
@@ -53,6 +54,7 @@ export class MissionService {
   private readonly provisioner: ProjectProvisioner;
   private readonly runningMissions = new Map<string, MissionState>();
   private readonly eventSinks = new Map<string, InMemoryEventSink>();
+  private readonly pixelOfficeReporters = new Map<string, PixelOfficeReporter>();
 
   constructor(config: MissionServiceConfig) {
     this.factoryRoot = config.factoryRoot;
@@ -209,6 +211,13 @@ export class MissionService {
     const eventSink = new InMemoryEventSink();
     this.eventSinks.set(missionId, eventSink);
     this.runningMissions.set(missionId, state);
+
+    // Start Pixel Office reporting if configured
+    const pixelOfficeReporter = createPixelOfficeReporter(eventSink);
+    if (pixelOfficeReporter) {
+      pixelOfficeReporter.start();
+      this.pixelOfficeReporters.set(missionId, pixelOfficeReporter);
+    }
 
     this.bridgeMissionEvents(missionId, eventSink);
 

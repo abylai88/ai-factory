@@ -14,6 +14,7 @@ import { MissionState } from "./state.js";
 import { Planner, createPlanner, ReadOnlyPlanner, createReadOnlyPlanner } from "./planner.js";
 import { MissionOrchestrator, RealFactoryAdapter, ReadOnlyFactoryAdapter, DeterministicAuditor } from "./orchestrator.js";
 import { InMemoryEventSink, NoopEventSink, MissionEventPublisher, createMissionEventPublisher, MissionEventTypes } from "./events.js";
+import { createPixelOfficeReporter } from "./pixel-office-reporter.js";
 import { resolveWorkspaceDir } from "../setup/project-setup.js";
 import { classifyGoal, detectEngine } from "../engine/engine.js";
 import { TemplateManager } from "../setup/project-setup.js";
@@ -428,6 +429,13 @@ async function main(): Promise<void> {
   }
 
   const eventSink = new InMemoryEventSink();
+
+  // Start Pixel Office reporting if configured
+  const pixelOfficeReporter = createPixelOfficeReporter(eventSink, console.log);
+  if (pixelOfficeReporter) {
+    pixelOfficeReporter.start();
+  }
+
   let innerAdapter;
   if (readOnly) {
     innerAdapter = new ReadOnlyFactoryAdapter();
@@ -473,6 +481,8 @@ async function main(): Promise<void> {
     console.error(error instanceof Error ? error.message : error);
     await missionState.completeMission("failed");
     process.exitCode = 1;
+  } finally {
+    pixelOfficeReporter?.stop();
   }
 }
 

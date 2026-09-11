@@ -18,11 +18,22 @@ import {
 import { normalizeVisualQaEvidence } from "./visual-qa-evidence.js";
 import { MissionState } from "./state.js";
 import { MissionEventSink } from "./mission.js";
+import type { ModelRouter } from "./model-router.js";
 import { MissionEventPublisher, createMissionEventPublisher, MissionEventTypes } from "./events.js";
+import { ValidationGate, type ValidationConfig, type ValidationResult } from "./validation-gate.js";
 import { runGoal } from "../pipeline/pipeline-runner.js";
 import type { VisualQaAdapter } from "./visual-qa-adapter.js";
 import type { RepairExecutor, RepairExecutionResult } from "./repair-executor.js";
 import { classifyDiagnosis, generateRepairPlan } from "./diagnosis.js";
+import { classifyFailure, buildTriagePrompt, type TriageResult } from "./failure-triage.js";
+import { MissionMemory, createMissionMemory } from "./mission-memory.js";
+import type { MissionPlanner } from "./mission-planner.js";
+import { PeerReviewSystem, defaultReviewExecutor, type ReviewExecutor, type ReviewRequest, type ReviewResult } from "./peer-review.js";
+import { ArtifactStore, type MissionArtifact } from "./artifact-store.js";
+import type { MissionSupervisor } from "./mission-supervisor.js";
+import type { SupervisorDecision } from "./mission-supervisor.js";
+import { isModelProviderFailure } from "./model-failure-classifier.js";
+import { randomUUID } from "node:crypto";
 
 export interface FactoryExecutionAdapter {
   runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string }): Promise<AgentResult>;
@@ -42,6 +53,19 @@ export interface OrchestratorConfig {
   missionState: MissionState;
   visualQaAdapter?: VisualQaAdapter;
   repairExecutor?: RepairExecutor;
+  validation?: ValidationConfig;
+  replanner?: MissionPlanner;
+  maxDynamicDelegations?: number;
+  maxReplanAttempts?: number;
+  // Phase 8: Peer review
+  peerReview?: PeerReviewSystem;
+  reviewExecutor?: ReviewExecutor;
+  // Phase 8: Model fallback
+  modelRouter?: ModelRouter;
+  maxModelFallbackAttempts?: number;
+  // Phase 9: Supervisor
+  supervisor?: MissionSupervisor;
+  maxDelegationDurationMs?: number;
 }
 
 const DEFAULT_MAX_REPAIRS = 3;
@@ -49,14 +73,23 @@ const DEFAULT_MAX_REPAIRS = 3;
 export class MissionOrchestrator {
   private readonly config: OrchestratorConfig;
   private readonly publisher: MissionEventPublisher;
+  private readonly validationGate: ValidationGate | null;
+  private memory: MissionMemory | null = null;
   private currentMission: Mission | null = null;
   private currentPlan: ExecutionPlan | null = null;
   private isRunning = false;
   private readonly readOnlyDelegations = new Set<string>();
+  private dynamicDelegations: Delegation[] = [];
+  private dynamicDelegationCount = 0;
+  private replanCount = 0;
+  private artifactStore: ArtifactStore | null = null;
+  private delegationStartTimes = new Map<string, number>();
 
   constructor(config: OrchestratorConfig) {
     this.config = {
       maxRepairs: config.maxRepairs ?? DEFAULT_MAX_REPAIRS,
+      maxDynamicDelegations: config.maxDynamicDelegations ?? 10,
+      maxReplanAttempts: config.maxReplanAttempts ?? 2,
       baseDir: config.baseDir,
       project: config.project,
       factoryAdapter: config.factoryAdapter,
@@ -65,72 +98,73 @@ export class MissionOrchestrator {
       missionState: config.missionState,
       visualQaAdapter: config.visualQaAdapter,
       repairExecutor: config.repairExecutor,
+      validation: config.validation,
+      replanner: config.replanner,
+      peerReview: config.peerReview,
+      reviewExecutor: config.reviewExecutor ?? defaultReviewExecutor,
+      modelRouter: config.modelRouter,
+      maxModelFallbackAttempts: config.maxModelFallbackAttempts,
+      maxDelegationDurationMs: config.maxDelegationDurationMs,
+      supervisor: config.supervisor,
     };
     this.publisher = createMissionEventPublisher(this.config.eventSink);
+    this.validationGate = config.validation ? new ValidationGate(config.validation) : null;
   }
 
   async executeMission(mission: Mission, plan: ExecutionPlan): Promise<Mission> {
     this.currentMission = mission;
     this.currentPlan = plan;
     this.isRunning = true;
+    this.memory = createMissionMemory(this.config.missionState, this.config.eventSink);
+    this.artifactStore = new ArtifactStore(mission.id);
+    this.dynamicDelegations = [];
+    this.dynamicDelegationCount = 0;
+    this.replanCount = 0;
 
     await this.config.missionState.startMission();
 
+    // Phase 9: Emit supervisor started event
+    this.publisher.publish({
+      missionId: mission.id,
+      type: "mission.supervisor.started" as any,
+      payload: { missionId: mission.id },
+    });
+
     try {
-      const sortedDelegations = this.topologicalSort(plan.delegations);
+      const graphSuccess = await this.executeDelegationGraph(plan.delegations);
 
-      for (let i = 0; i < sortedDelegations.length; i++) {
-        if (!this.isRunning) break;
-
-        const delegation = sortedDelegations[i];
-        await this.config.missionState.updateDelegationIndex(i);
-
-        const canRun = this.canRunDelegation(delegation);
-        if (!canRun) {
-          await this.config.missionState.completeDelegation(delegation.id, "blocked", undefined, "Dependencies not met");
-          continue;
+      if (!graphSuccess) {
+        // Phase 9: Check for stuck delegations before failing
+        const stuckIds = this.config.supervisor?.checkStuckDelegations() ?? [];
+        for (const stuckId of stuckIds) {
+          const stuckDel = this.config.missionState.getDelegation(stuckId);
+          if (stuckDel) {
+            await this.config.supervisor?.handleStuckDelegation(stuckId, mission.id);
+          }
         }
 
-        const agentResult = await this.executeDelegation(delegation);
+        await this.config.missionState.completeMission("failed");
+        this.currentMission = { ...this.currentMission!, status: "failed" };
+        return this.currentMission;
+      }
 
-        if (!this.isRunning) break;
-
-        // Phase 8A: Run Visual QA after successful build if required
-        const isBuilder = delegation.description.includes("ROLE: builder") || delegation.description.includes("BUILD_COMMAND:");
-        if (isBuilder && agentResult.status === "passed" && this.currentMission?.context?.requiresVisualQa) {
-          await this.runVisualQa(delegation);
-
-          // Phase 9B: Self-healing loop after Visual QA failure
-          const currentQa = this.currentMission?.visualQa;
-          if (currentQa && currentQa.status === "failed" && this.config.repairExecutor) {
-            const healed = await this.selfHealingLoop(delegation);
-            if (!healed) {
-              await this.config.missionState.completeMission("failed");
-              this.currentMission = { ...this.currentMission!, status: "failed" };
-              return this.currentMission;
-            }
-            // After successful repair, continue to next delegation
+      // Execute any dynamically added delegations
+      while (this.dynamicDelegations.length > 0 && this.isRunning) {
+        const batch = this.dynamicDelegations.splice(0);
+        for (const del of batch) {
+          if (!this.isRunning) break;
+          if (!this.canRunDelegation(del)) {
+            await this.config.missionState.completeDelegation(del.id, "blocked", undefined, "Dependencies not met");
             continue;
           }
+          await this.processSingleDelegation(del);
         }
+      }
 
-        const auditResult = await this.auditDelegation(delegation);
-
-        if (auditResult.status === "FAIL") {
-          const repaired = await this.repairDelegation(delegation, auditResult);
-          if (!repaired) {
-            await this.config.missionState.completeMission("failed");
-            this.currentMission = { ...this.currentMission!, status: "failed" };
-            return this.currentMission;
-          }
-
-          const reauditResult = await this.auditDelegation(delegation);
-          if (reauditResult.status === "FAIL") {
-            await this.config.missionState.completeMission("failed");
-            this.currentMission = { ...this.currentMission!, status: "failed" };
-            return this.currentMission;
-          }
-        }
+      if (!this.isRunning) {
+        await this.config.missionState.completeMission("failed");
+        this.currentMission = { ...this.currentMission!, status: "failed" };
+        return this.currentMission;
       }
 
       await this.config.missionState.completeMission("completed");
@@ -139,6 +173,619 @@ export class MissionOrchestrator {
     } finally {
       this.isRunning = false;
     }
+  }
+
+  private async executeDelegationGraph(allDelegations: Delegation[]): Promise<boolean> {
+    const delegations = [...allDelegations];
+    const completed = new Set<string>();
+    const failed = new Set<string>();
+
+    while (delegations.length > 0 && this.isRunning) {
+      const ready: Delegation[] = [];
+      const waiting: Delegation[] = [];
+
+      for (const del of delegations) {
+        const depsMet = del.dependsOn.every((depId) => completed.has(depId));
+        const depsNotFailed = del.dependsOn.every((depId) => !failed.has(depId));
+
+        if (depsMet && depsNotFailed) {
+          ready.push(del);
+        } else if (!depsNotFailed) {
+          // A dependency failed — block this delegation permanently
+          await this.config.missionState.completeDelegation(del.id, "blocked", undefined, "Upstream dependency failed");
+          failed.add(del.id);
+        } else {
+          waiting.push(del);
+        }
+      }
+
+      // Emit blocked events for waiting delegations
+      for (const del of waiting) {
+        this.publisher.publish({
+          missionId: del.missionId,
+          type: "delegation.blocked" as any,
+          payload: { delegationId: del.id, waitingFor: del.dependsOn.filter(d => !completed.has(d)) },
+        });
+      }
+
+      if (ready.length === 0) {
+        if (waiting.length > 0) {
+          // Deadlock — all remaining are waiting but none completed
+          for (const del of waiting) {
+            await this.config.missionState.completeDelegation(del.id, "blocked", undefined, "Deadlock: dependencies cannot be satisfied");
+            failed.add(del.id);
+          }
+        }
+        break;
+      }
+
+      // Separate into parallel and sequential
+      const parallel = ready.filter((d) => d.parallelizable);
+      const sequential = ready.filter((d) => !d.parallelizable);
+
+      // Execute parallel delegations concurrently (or single parallel sequentially)
+      if (parallel.length > 1) {
+        const results = await Promise.allSettled(
+          parallel.map(async (del) => {
+            this.publisher.publish({
+              missionId: del.missionId,
+              type: "delegation.ready" as any,
+              payload: { delegationId: del.id },
+            });
+            return this.processSingleDelegation(del);
+          })
+        );
+
+        for (let i = 0; i < parallel.length; i++) {
+          const del = parallel[i];
+          const result = results[i];
+          if (result.status === "fulfilled" && result.value.status === "passed") {
+            completed.add(del.id);
+          } else {
+            failed.add(del.id);
+          }
+        }
+
+        // Also execute sequential delegations one at a time
+        for (const del of sequential) {
+          if (!this.isRunning) break;
+          this.publisher.publish({
+            missionId: del.missionId,
+            type: "delegation.ready" as any,
+            payload: { delegationId: del.id },
+          });
+          const result = await this.processSingleDelegation(del);
+          if (result.status === "passed") {
+            completed.add(del.id);
+          } else {
+            failed.add(del.id);
+          }
+        }
+      } else {
+        // Execute all ready delegations sequentially (0 or 1 parallel + sequential)
+        const allReady = [...parallel, ...sequential];
+        for (const del of allReady) {
+          if (!this.isRunning) break;
+          this.publisher.publish({
+            missionId: del.missionId,
+            type: "delegation.ready" as any,
+            payload: { delegationId: del.id },
+          });
+          const result = await this.processSingleDelegation(del);
+          if (result.status === "passed") {
+            completed.add(del.id);
+          } else {
+            failed.add(del.id);
+          }
+        }
+      }
+
+      // Remove processed delegations
+      for (const del of ready) {
+        const idx = delegations.indexOf(del);
+        if (idx !== -1) delegations.splice(idx, 1);
+      }
+    }
+
+    // Any delegation in the failed set (actual failure or blocked-by-failure) means graph fails
+    if (failed.size > 0) {
+      return false;
+    }
+    return true;
+  }
+
+  private async processSingleDelegation(delegation: Delegation): Promise<AgentResult> {
+    // Phase 9: Record delegation start time for stuck detection
+    if (!this.delegationStartTimes.has(delegation.id)) {
+      this.delegationStartTimes.set(delegation.id, Date.now());
+    }
+
+    const agentResult = await this.executeDelegation(delegation);
+
+    if (!this.isRunning) return agentResult;
+
+    // ── Phase 9: Stuck detection during execution ──
+    const startTime = this.delegationStartTimes.get(delegation.id) ?? 0;
+    const maxDuration = this.config.maxDelegationDurationMs ?? 30000;
+    if (Date.now() - startTime > maxDuration) {
+      // Delegation is stuck - notify supervisor
+      this.config.supervisor?.handleStuckDelegation(delegation.id, this.currentMission!.id);
+      this.delegationStartTimes.delete(delegation.id);
+      return { ...agentResult, status: "failed", error: "Delegation timed out (stuck)" };
+    }
+
+    // Phase 8: track whether audit repair elevated a failed delegation to passed
+    let auditRecovered = false;
+
+    // ── Phase 9: Notify supervisor of delegation failure ──
+    let supervisorDecision: SupervisorDecision | undefined;
+    if (agentResult.status === "failed" && this.config.supervisor) {
+      supervisorDecision = await this.config.supervisor.handleDelegationFailure(delegation, agentResult);
+    }
+
+    // Execute recovery decision if supervisor provided one
+    if (supervisorDecision && this.isRunning) {
+      const recoverySuccess = await this.executeRecoveryDecision(delegation, agentResult, supervisorDecision);
+      if (recoverySuccess) return { ...agentResult, status: "passed" };
+    }
+
+    // Validation gate
+    if (this.validationGate && agentResult.status === "passed" && !agentResult.readOnly) {
+      const validationResult = await this.runValidation(delegation, agentResult);
+      if (!validationResult.passed) {
+        const repaired = await this.repairValidationFailure(delegation, validationResult);
+        if (!repaired) {
+          // Check if replanning should be attempted
+          if (this.config.replanner && this.replanCount < (this.config.maxReplanAttempts ?? 2)) {
+            const replanned = await this.attemptReplan(delegation);
+            if (replanned) return { ...agentResult, status: "passed" };
+          }
+          return { ...agentResult, status: "failed" };
+        }
+      }
+    }
+
+    // Visual QA
+    const isBuilder = delegation.description.includes("ROLE: builder") || delegation.description.includes("BUILD_COMMAND:");
+    if (isBuilder && agentResult.status === "passed" && this.currentMission?.context?.requiresVisualQa) {
+      await this.runVisualQa(delegation);
+
+      const currentQa = this.currentMission?.visualQa;
+      if (currentQa && currentQa.status === "failed" && this.config.repairExecutor) {
+        const healed = await this.selfHealingLoop(delegation);
+        if (!healed) {
+          return { ...agentResult, status: "failed" };
+        }
+        return { ...agentResult, status: "passed" };
+      }
+    }
+
+    // Audit
+    const auditResult = await this.auditDelegation(delegation);
+
+    if (auditResult.status === "FAIL") {
+      const repaired = await this.repairDelegation(delegation, auditResult);
+      if (!repaired) {
+        // Check if replanning should be attempted after audit repair failure
+        if (this.config.replanner && this.replanCount < (this.config.maxReplanAttempts ?? 2)) {
+          const replanned = await this.attemptReplan(delegation);
+          if (replanned) return { ...agentResult, status: "passed" };
+        }
+        return { ...agentResult, status: "failed" };
+      }
+
+      const reauditResult = await this.auditDelegation(delegation);
+      if (reauditResult.status === "FAIL") {
+        // Check if replanning should be attempted after re-audit failure
+        if (this.config.replanner && this.replanCount < (this.config.maxReplanAttempts ?? 2)) {
+          const replanned = await this.attemptReplan(delegation);
+          if (replanned) return { ...agentResult, status: "passed" };
+        }
+        return { ...agentResult, status: "failed" };
+      }
+
+      // Audit repair succeeded and re-audit passed: the delegation has been recovered
+      auditRecovered = true;
+    }
+
+    // Phase 8: Independent peer review
+    // The agent must NOT be the only authority validating its own work.
+    // If the delegation requires review, route to an independent reviewer.
+    if (delegation.requiresReview && agentResult.status === "passed" && this.config.peerReview) {
+      const reviewed = await this.peerReviewDelegation(delegation, agentResult);
+      if (!reviewed) {
+        return { ...agentResult, status: "failed" };
+      }
+    }
+
+    // If audit repair recovered a failed agentResult, return passed.
+    // Otherwise preserve the original agentResult status.
+    if (auditRecovered) {
+      return { ...agentResult, status: "passed" };
+    }
+
+    // Phase 8 Gap 2: Automatically register artifacts from successful delegations
+    if (agentResult.status === "passed" && this.artifactStore) {
+      this.collectAndRegisterArtifacts(delegation, agentResult);
+    }
+
+    // Phase 9: Notify supervisor of completion
+    this.config.supervisor?.observeDelegationCompleted(delegation.id, agentResult);
+
+    return agentResult;
+  }
+
+  /**
+   * Execute a recovery decision using existing orchestrator mechanisms.
+   * Handles: REPAIR, REPLAN, CHANGE_MODEL, ESCALATE, ABORT decisions.
+   * Returns true if recovery was attempted (may still fail), false if no action needed.
+   */
+  private async executeRecoveryDecision(
+    delegation: Delegation,
+    agentResult: AgentResult,
+    decision: SupervisorDecision,
+  ): Promise<boolean> {
+    switch (decision.type) {
+      case "REPAIR": {
+        // Use the orchestrator's existing repair mechanism
+        const repaired = await this.repairDelegation(delegation, {
+          recommendedRepair: {
+            description: agentResult.error ?? `Fix failed delegation: ${delegation.title}`,
+            focusAreas: ["general repair"],
+          },
+        } as AuditResult);
+        return repaired !== false;
+      }
+
+      case "REPLAN": {
+        if (this.config.replanner && this.replanCount < (this.config.maxReplanAttempts ?? 2)) {
+          const replanned = await this.attemptReplan(delegation);
+          return replanned;
+        }
+        return false;
+      }
+
+      case "CHANGE_MODEL": {
+        if (this.config.modelRouter) {
+          const route = this.config.modelRouter.chooseModel({
+            delegation,
+            role: delegation.role ?? "Developer",
+            mission: this.currentMission!,
+          });
+          let currentModel = route.primary;
+          let attemptedModels: string[] = [currentModel];
+          for (let i = 0; i < (this.config.maxModelFallbackAttempts ?? 3); i++) {
+            const nextModel = this.config.modelRouter!.nextFallback(route, currentModel);
+            if (!nextModel) break;
+            attemptedModels.push(nextModel);
+            currentModel = nextModel;
+            const result = await this.executeDelegation(delegation);
+            if (result.status === "passed") return true;
+          }
+          return false;
+        }
+        return false;
+      }
+
+      case "ESCALATE": {
+        // Escalation is handled by the supervisor's escalation logic;
+        // the orchestrator logs the escalation. Returns false because escalation
+        // does not recover the delegation — it signals the delegation needs attention.
+        this.publisher.publish({
+          missionId: delegation.missionId,
+          type: MissionEventTypes.DELEGATION_ESCALATED,
+          payload: {
+            delegationId: delegation.id,
+            reason: decision.reason,
+          },
+        });
+        return false;
+      }
+
+      case "ABORT": {
+        // Abort the delegation - mark as failed and do not retry
+        await this.config.missionState.completeDelegation(delegation.id, "failed",
+          agentResult.output, agentResult.error);
+        return true;
+      }
+
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Phase 8 Gap 2: Automatically register artifacts produced by a delegation.
+   * Parses the agent output for file paths and registers lightweight metadata.
+   * Does not store raw file contents.
+   */
+  private collectAndRegisterArtifacts(delegation: Delegation, agentResult: AgentResult): void {
+    if (!this.artifactStore || !this.currentMission) return;
+
+    // Infer artifact type from role/description
+    const artifactType = this.inferArtifactType(delegation);
+
+    // Extract file paths from output (common patterns in delegation results)
+    const filePaths = this.extractFilePathsFromOutput(agentResult.output);
+
+    // If output declares specific paths, use those
+    const declaredOutputs = this.extractDeclaredOutputs(delegation);
+
+    const pathsToRegister = [...new Set([...filePaths, ...declaredOutputs])];
+
+    // Register each artifact (bounded by store limits)
+    for (const filePath of pathsToRegister.slice(0, 10)) {
+      const artifact = this.artifactStore.registerArtifact({
+        delegationId: delegation.id,
+        type: artifactType,
+        title: `${delegation.title} - ${filePath.split("/").pop() ?? filePath}`,
+        summary: `Created/modified by ${delegation.title}`,
+        createdByRole: delegation.role ?? "Developer",
+        path: filePath,
+      });
+
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: "delegation.artifact.created" as any,
+        payload: {
+          delegationId: delegation.id,
+          artifactId: artifact.id,
+          type: artifact.type,
+          path: filePath,
+        },
+      });
+    }
+
+    // If no paths found but delegation produced output, register a single report artifact
+    if (pathsToRegister.length === 0 && agentResult.output.length > 0) {
+      const artifact = this.artifactStore.registerArtifact({
+        delegationId: delegation.id,
+        type: "report",
+        title: `${delegation.title} output`,
+        summary: agentResult.output.slice(0, 200),
+        createdByRole: delegation.role ?? "Developer",
+      });
+
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: "delegation.artifact.created" as any,
+        payload: {
+          delegationId: delegation.id,
+          artifactId: artifact.id,
+          type: artifact.type,
+        },
+      });
+    }
+  }
+
+  /**
+   * Infer artifact type from delegation role and description.
+   */
+  private inferArtifactType(delegation: Delegation): MissionArtifact["type"] {
+    const desc = delegation.description.toLowerCase();
+    const role = delegation.role;
+
+    if (role === "QA" || desc.includes("test")) return "test";
+    if (role === "Researcher" || desc.includes("research") || desc.includes("analysis")) return "research";
+    if (role === "Designer" || desc.includes("design") || desc.includes("ui")) return "design";
+    if (desc.includes("build") || desc.includes("compile")) return "code";
+    return "code"; // default for Developer/Repair/Architect
+  }
+
+  /**
+   * Extract file paths from delegation output text.
+   * Looks for common patterns like src/..., tests/..., *.ts, *.js files.
+   */
+  private extractFilePathsFromOutput(output: string): string[] {
+    const paths: string[] = [];
+    // Match common file path patterns
+    const pathRegex = /(?:^|\s)((?:src|lib|tests?|app|pages|components?|utils?|public|assets?)\/[\w./-]+\.\w{1,5})\b/gm;
+    let match;
+    while ((match = pathRegex.exec(output)) !== null) {
+      const p = match[1]?.trim();
+      if (p && p.length < 200 && !paths.includes(p)) {
+        paths.push(p);
+      }
+    }
+    return paths.slice(0, 10); // bound
+  }
+
+  /**
+   * Extract declared outputs from delegation description/metadata.
+   */
+  private extractDeclaredOutputs(delegation: Delegation): string[] {
+    const outputs: string[] = [];
+    // Look for FILE: markers in description
+    const fileRegex = /FILE:\s*([\w./-]+\.\w{1,5})/gi;
+    let match;
+    while ((match = fileRegex.exec(delegation.description)) !== null) {
+      const p = match[1]?.trim();
+      if (p && p.length < 200 && !outputs.includes(p)) {
+        outputs.push(p);
+      }
+    }
+    return outputs.slice(0, 10);
+  }
+
+  /**
+   * Phase 8 Gap 1: Run an independent peer review on a delegation with a
+   * bounded retry loop. On each failure, create a repair delegation and
+   * re-review. Loop respects PeerReviewSystem.maxReviewAttempts.
+   *
+   * Returns true if the delegation is approved (review passed or skipped).
+   * Returns false if all review attempts were exhausted.
+   */
+  private async peerReviewDelegation(
+    delegation: Delegation,
+    agentResult: AgentResult,
+  ): Promise<boolean> {
+    const reviewSystem = this.config.peerReview;
+    if (!reviewSystem || !this.currentMission) return true;
+
+    const executor = this.config.reviewExecutor;
+    const maxAttempts = Math.max(1, reviewSystem.getMaxAttempts());
+
+    // Track the latest review target (the original on the first attempt,
+    // a fresh review request on each retry) and the most recent review result.
+    let lastReviewRequest: ReviewRequest | null = null;
+    let attempt = 0;
+
+    while (attempt < maxAttempts) {
+      attempt++;
+
+      const request: ReviewRequest | null = lastReviewRequest
+        ? reviewSystem.createReviewRequest({
+            delegation,
+            agentResult: { ...agentResult, status: "passed" as const },
+            mission: this.currentMission,
+            validationPassed: true,
+          })
+        : reviewSystem.createReviewRequest({
+            delegation,
+            agentResult,
+            mission: this.currentMission,
+            validationPassed: true,
+          });
+
+      if (!request) {
+        // No review needed (e.g., no role or self-review would be required)
+        return true;
+      }
+      lastReviewRequest = request;
+
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: "delegation.review.started" as any,
+        payload: {
+          delegationId: delegation.id,
+          reviewerRole: request.reviewerRole,
+          originalRole: request.originalRole,
+          attempt,
+          maxAttempts,
+        },
+      });
+
+      // Run the review using the configured review executor
+      if (!executor) {
+        // No executor: default behavior is to approve
+        this.publisher.publish({
+          missionId: delegation.missionId,
+          type: "delegation.review.passed" as any,
+          payload: { delegationId: delegation.id, skipped: true, attempt },
+        });
+        return true;
+      }
+
+      const result = await reviewSystem.conductReview(request, executor);
+
+      if (result.passed) {
+        this.publisher.publish({
+          missionId: delegation.missionId,
+          type: "delegation.review.passed" as any,
+          payload: {
+            delegationId: delegation.id,
+            reviewerRole: result.reviewerRole,
+            summary: result.summary,
+            attempt,
+          },
+        });
+        return true;
+      }
+
+      // Review failed
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: "delegation.review.failed" as any,
+        payload: {
+          delegationId: delegation.id,
+          reviewerRole: result.reviewerRole,
+          issues: result.issues,
+          summary: result.summary,
+          attempt,
+          maxAttempts,
+        },
+      });
+
+      // If we've exhausted the budget, fail
+      if (attempt >= maxAttempts) {
+        return false;
+      }
+
+      // Build a review-driven repair delegation
+      const reviewRepairDelegation = this.createReviewRepairDelegation(
+        delegation,
+        request,
+        result,
+        attempt,
+      );
+      await this.config.missionState.addDelegation(reviewRepairDelegation);
+
+      // Run the review-driven repair
+      const repairResult = await this.executeDelegation(reviewRepairDelegation);
+      if (repairResult.status !== "passed") {
+        // Repair itself failed; continue to next attempt for re-review.
+        // The next iteration's `agentResult` is the original (unchanged) so
+        // the review target stays anchored on the original work.
+        continue;
+      }
+
+      // Repair succeeded; loop continues with the next re-review.
+      // The next iteration creates a new request from the original delegation
+      // but with `status: "passed"` so the reviewer can re-evaluate.
+    }
+
+    return false;
+  }
+
+  /**
+   * Create a delegation that performs a repair based on review feedback.
+   * Includes attempt number, MissionMemory context, and relevant artifacts.
+   */
+  private createReviewRepairDelegation(
+    original: Delegation,
+    request: ReviewRequest,
+    result: ReviewResult,
+    attempt: number,
+  ): Delegation {
+    const issuesText = result.issues
+      .map((i) => `- [${i.severity}] ${i.description}${i.suggestedAction ? ` (suggested: ${i.suggestedAction})` : ""}`)
+      .join("\n");
+
+    const memoryBlock = this.memory?.buildContextBlock(original.id) ?? "";
+
+    const description = [
+      `REVIEW REWORK for: ${original.title} (attempt ${attempt})`,
+      ``,
+      `Original task: ${original.description}`,
+      ``,
+      `Reviewer (${request.reviewerRole}) found the following issues:`,
+      issuesText,
+      ``,
+      `Address all issues above. The work will be re-reviewed.`,
+      ``,
+      memoryBlock ? `MISSION CONTEXT:\n${memoryBlock}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    return {
+      id: `rev-repair-${original.id}-${attempt}-${randomUUID().slice(0, 6)}`,
+      missionId: original.missionId,
+      objectiveId: original.objectiveId,
+      title: `[Review Repair ${attempt}] ${original.title}`,
+      description,
+      pipelineType: original.pipelineType,
+      dependsOn: [original.id],
+      parallelizable: false,
+      acceptanceCriteria: [
+        ...(original.acceptanceCriteria ?? []),
+        "All review issues addressed",
+      ],
+      status: "queued",
+      createdAt: new Date().toISOString(),
+      role: "Repair",
+      retryOf: original.id,
+    };
   }
 
   // ─── Phase 9B: Self-Healing Loop ──────────────────────────────────
@@ -414,39 +1061,88 @@ export class MissionOrchestrator {
       payload: { delegationId: delegation.id, title: delegation.title },
     });
 
+    // Phase 9: Notify supervisor
+    this.config.supervisor?.observeDelegationStarted(delegation);
+
     const startTime = Date.now();
     let agentResult: AgentResult;
+    let lastError: string | null = null;
+    const attemptedModels: string[] = [];
 
-    try {
-      const adapterResult = await this.config.factoryAdapter.runDelegation(delegation, this.currentMission!, {
-        baseDir: this.config.baseDir,
-        project: this.config.project,
-        fromStep: delegation.stepIds?.[0],
-      });
+    // Phase 8 Gap 3: Model fallback chain
+    const router = this.config.modelRouter;
+    const maxFallbackAttempts = this.config.maxModelFallbackAttempts ?? 3;
 
-      const updatedDelegation = this.config.missionState.getDelegation(delegation.id);
+    const executeOnce = async (): Promise<AgentResult> => {
+      try {
+        const adapterResult = await this.config.factoryAdapter.runDelegation(delegation, this.currentMission!, {
+          baseDir: this.config.baseDir,
+          project: this.config.project,
+          fromStep: delegation.stepIds?.[0],
+        });
 
-      agentResult = {
-        delegationId: delegation.id,
-        pipelineId: adapterResult.pipelineId ?? updatedDelegation?.pipelineId,
-        status: adapterResult.status,
-        output: adapterResult.output || updatedDelegation?.result || "",
-        error: adapterResult.error ?? updatedDelegation?.error,
-        durationMs: Date.now() - startTime,
-        readOnly: adapterResult.readOnly,
-      };
+        const updatedDelegation = this.config.missionState.getDelegation(delegation.id);
 
-      if (adapterResult.readOnly) {
-        this.readOnlyDelegations.add(delegation.id);
+        return {
+          delegationId: delegation.id,
+          pipelineId: adapterResult.pipelineId ?? updatedDelegation?.pipelineId,
+          status: adapterResult.status,
+          output: adapterResult.output || updatedDelegation?.result || "",
+          error: adapterResult.error ?? updatedDelegation?.error,
+          durationMs: Date.now() - startTime,
+          readOnly: adapterResult.readOnly,
+        };
+      } catch (error) {
+        return {
+          delegationId: delegation.id,
+          status: "failed",
+          output: "",
+          error: error instanceof Error ? error.message : String(error),
+          durationMs: Date.now() - startTime,
+        };
       }
-    } catch (error) {
-      agentResult = {
-        delegationId: delegation.id,
-        status: "failed",
-        output: "",
-        error: error instanceof Error ? error.message : String(error),
-        durationMs: Date.now() - startTime,
-      };
+    };
+
+    agentResult = await executeOnce();
+
+    // If adapter threw (provider/model failure) and router is configured, retry with fallbacks
+    if (router && isModelProviderFailure(agentResult) && agentResult.status === "failed") {
+      const route = router.chooseModel({ delegation, role: delegation.role ?? "Developer", mission: this.currentMission! });
+      let currentModel = route.primary;
+      attemptedModels.push(currentModel);
+
+      for (let i = 0; i < maxFallbackAttempts; i++) {
+        const nextModel = router.nextFallback(route, currentModel);
+        if (!nextModel) break;
+
+        attemptedModels.push(nextModel);
+        currentModel = nextModel;
+
+        this.publisher.publish({
+          missionId: delegation.missionId,
+          type: "delegation.model_fallback" as any,
+          payload: {
+            delegationId: delegation.id,
+            previousModel: attemptedModels[attemptedModels.length - 2] ?? "unknown",
+            nextModel,
+            reason: agentResult.error ?? "Provider failure",
+            attemptedModels: [...attemptedModels],
+          },
+        });
+
+        // Phase 9: Notify supervisor of model fallback
+        this.config.supervisor?.observeModelFallback(delegation.id, nextModel);
+
+        agentResult = await executeOnce();
+        if (!isModelProviderFailure(agentResult) || agentResult.status !== "failed") {
+          break;
+        }
+      }
+    }
+
+    // Read-only tracking
+    if (agentResult.readOnly) {
+      this.readOnlyDelegations.add(delegation.id);
     }
 
     const finalStatus: DelegationStatus = agentResult.status === "passed" ? "passed" : "failed";
@@ -464,6 +1160,178 @@ export class MissionOrchestrator {
     });
 
     return agentResult;
+  }
+
+  private async runValidation(
+    delegation: Delegation,
+    agentResult: AgentResult,
+  ): Promise<ValidationResult> {
+    this.publisher.publish({
+      missionId: delegation.missionId,
+      type: MissionEventTypes.DELEGATION_VALIDATION_STARTED,
+      payload: { delegationId: delegation.id, title: delegation.title },
+    });
+
+    const result = await this.validationGate!.validate(
+      delegation,
+      this.currentMission!,
+      this.config.project,
+      this.config.validation,
+    );
+
+    if (result.passed) {
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: MissionEventTypes.DELEGATION_VALIDATION_PASSED,
+        payload: {
+          delegationId: delegation.id,
+          command: result.command,
+          durationMs: result.durationMs,
+        },
+      });
+    } else {
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: MissionEventTypes.DELEGATION_VALIDATION_FAILED,
+        payload: {
+          delegationId: delegation.id,
+          command: result.command,
+          exitCode: result.exitCode,
+          stderr: result.stderr.slice(0, 500),
+          durationMs: result.durationMs,
+        },
+      });
+    }
+
+    return result;
+  }
+
+  private async repairValidationFailure(
+    delegation: Delegation,
+    validationResult: ValidationResult,
+  ): Promise<boolean> {
+    const maxAttempts = this.config.validation?.maxRepairAttempts ?? 3;
+    const previousErrors: string[] = [];
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (!this.isRunning) return false;
+
+      // Classify the failure and determine routing
+      const triage = classifyFailure({
+        delegation,
+        validationResult,
+        attempt,
+        maxAttempts,
+        previousErrors,
+      });
+
+      // Emit triage decision event
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: MissionEventTypes.DELEGATION_TRIAGE,
+        payload: {
+          delegationId: delegation.id,
+          attempt,
+          action: triage.action,
+          targetRole: triage.targetRole,
+          category: triage.category,
+          reason: triage.reason,
+          priority: triage.priority,
+        },
+      });
+
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: MissionEventTypes.DELEGATION_RETRY_STARTED,
+        payload: {
+          delegationId: delegation.id,
+          attempt,
+          maxAttempts,
+          reason: triage.reason,
+        },
+      });
+
+      // Build role-aware prompt using triage result and mission memory
+      const repairPrompt = buildTriagePrompt(
+        delegation,
+        validationResult,
+        triage,
+        attempt,
+        maxAttempts,
+        previousErrors,
+        this.memory ?? undefined,
+      );
+
+      // Create and execute repair delegation
+      const repairDelegation = this.createTriageRepairDelegation(
+        delegation,
+        repairPrompt,
+        triage,
+        `triage-${triage.action}-${delegation.id}-${attempt}`,
+      );
+
+      await this.config.missionState.addDelegation(repairDelegation);
+
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: MissionEventTypes.DELEGATION_CREATED,
+        payload: {
+          delegationId: repairDelegation.id,
+          title: repairDelegation.title,
+          objectiveId: repairDelegation.objectiveId,
+        },
+      });
+
+      const repairResult = await this.executeDelegation(repairDelegation);
+
+      if (repairResult.status === "failed") {
+        previousErrors.push(repairResult.error || "Agent execution failed");
+        continue;
+      }
+
+      // Re-run validation
+      const revalidation = await this.runValidation(delegation, repairResult);
+      if (revalidation.passed) {
+        return true;
+      }
+
+      previousErrors.push(
+        `Validation still failing: ${revalidation.command} exit ${revalidation.exitCode}`,
+      );
+      validationResult = revalidation;
+    }
+
+    return false;
+  }
+
+  private createTriageRepairDelegation(
+    original: Delegation,
+    repairPrompt: string,
+    triage: TriageResult,
+    repairId: string,
+  ): Delegation {
+    const actionLabel: Record<string, string> = {
+      repair: "Repair",
+      research: "Research",
+      qa_analysis: "QA Analysis",
+      architect_review: "Architect Review",
+      retry: "Retry",
+    };
+
+    return {
+      id: repairId,
+      missionId: original.missionId,
+      objectiveId: original.objectiveId,
+      title: `[${actionLabel[triage.action] ?? "Repair"}] ${original.title}`,
+      description: repairPrompt,
+      pipelineType: original.pipelineType,
+      stepIds: undefined,
+      dependsOn: [original.id],
+      parallelizable: false,
+      acceptanceCriteria: [...(original.acceptanceCriteria ?? []), "Validation passes"],
+      status: "queued",
+      createdAt: new Date().toISOString(),
+    };
   }
 
   private async runVisualQa(buildDelegation: Delegation): Promise<void> {
@@ -678,6 +1546,77 @@ export class MissionOrchestrator {
       durationMs: 0,
       readOnly: this.readOnlyDelegations.has(delegationId),
     };
+  }
+
+  // ─── Dynamic Delegation ──────────────────────────────────────
+
+  addDelegation(delegation: Delegation): boolean {
+    if (this.dynamicDelegationCount >= (this.config.maxDynamicDelegations ?? 10)) {
+      return false;
+    }
+    this.dynamicDelegations.push(delegation);
+    this.dynamicDelegationCount++;
+    this.config.missionState.addDelegation(delegation);
+
+    this.publisher.publish({
+      missionId: delegation.missionId,
+      type: "delegation.created",
+      payload: {
+        delegationId: delegation.id,
+        title: delegation.title,
+        pipelineType: delegation.pipelineType,
+        dynamic: true,
+      },
+    });
+
+    return true;
+  }
+
+  // ─── Replanning ──────────────────────────────────────────────
+
+  private async attemptReplan(failedDelegation: Delegation): Promise<boolean> {
+    if (!this.config.replanner || !this.currentMission || !this.memory) return false;
+
+    this.replanCount++;
+    this.publisher.publish({
+      missionId: this.currentMission.id,
+      type: "mission.replan_started" as any,
+      payload: {
+        attempt: this.replanCount,
+        failedDelegationId: failedDelegation.id,
+      },
+    });
+
+    try {
+      const newPlan = await this.config.replanner.createPlan(this.currentMission, this.memory);
+      this.currentPlan = newPlan;
+
+      // Add new delegations from the plan as dynamic delegations
+      for (const pd of newPlan.delegations) {
+        const existing = this.config.missionState.getDelegation(pd.id);
+        if (!existing) {
+          this.addDelegation(pd);
+        }
+      }
+
+      this.publisher.publish({
+        missionId: this.currentMission.id,
+        type: "mission.replan_completed" as any,
+        payload: {
+          attempt: this.replanCount,
+          delegationCount: newPlan.delegations.length,
+        },
+      });
+
+      return true;
+    } catch {
+      this.publisher.publish({
+        missionId: this.currentMission.id,
+        type: "mission.replan_failed" as any,
+        payload: { attempt: this.replanCount },
+      });
+      return false;
+    }
   }
 
   private canRunDelegation(delegation: Delegation): boolean {

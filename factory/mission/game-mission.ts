@@ -17,6 +17,7 @@ import { CodingMissionAuditor } from "./adapters.js";
 import { PlaywrightVisualQaAdapter } from "./playwright-visual-qa-adapter.js";
 import { DeterministicRepairExecutor } from "./repair-executor.js";
 import { InMemoryEventSink } from "./events.js";
+import { createPixelOfficeReporter } from "./pixel-office-reporter.js";
 import { MissionProjectManager, MissionAwareFactoryAdapter } from "./mission-project-manager.js";
 
 export interface GameMissionInput {
@@ -154,10 +155,18 @@ export async function executeGameMission(
   //    This matches the CLI pattern: all delegations go through runGoal()
   //    which dispatches to the appropriate agent based on pipeline type.
   const eventSink = new InMemoryEventSink();
+
+  // Start Pixel Office reporting if configured
+  const pixelOfficeReporter = createPixelOfficeReporter(eventSink);
+  if (pixelOfficeReporter) {
+    pixelOfficeReporter.start();
+  }
+
   const projectManager = new MissionProjectManager({ baseDir, provisioner });
   const innerAdapter = new RealFactoryAdapter();
   const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager }, innerAdapter);
 
+  try {
   if (workflowMode === "coding") {
     const auditor = new CodingMissionAuditor();
     const orchestrator = new MissionOrchestrator({
@@ -239,4 +248,7 @@ export async function executeGameMission(
     ...(audit ? { audit } : {}),
     ...(repairCycles > 0 ? { repairCycles } : {}),
   };
+  } finally {
+    pixelOfficeReporter?.stop();
+  }
 }
