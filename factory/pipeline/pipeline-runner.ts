@@ -12,6 +12,16 @@ import {
 export const MAX_FIX_ITERATIONS = 5;
 
 /**
+ * Structured result from a pipeline execution.
+ * Returned by PipelineRunner.run() and runGoal() so callers can
+ * determine actual success/failure without inferring from "did it throw?".
+ */
+export interface GoalResult {
+  status: "passed" | "failed";
+  output: string;
+}
+
+/**
  * Any component able to execute a pipeline step (an agent task).
  * The real implementation wraps TaskRunner; a dry-run/mock executor can be
  * injected to exercise orchestration logic without invoking real agents.
@@ -364,7 +374,7 @@ IMPORTANT:
     };
   }
 
-  async run(pipeline: Pipeline): Promise<void> {
+  async run(pipeline: Pipeline): Promise<GoalResult> {
     // Validate fromStep if provided
     let startIndex = 0;
     if (this.fromStep) {
@@ -411,6 +421,7 @@ IMPORTANT:
     }
 
     const total = pipeline.steps.length;
+    let lastStepOutput = "";
 
     for (
       let index = startIndex;
@@ -444,6 +455,8 @@ IMPORTANT:
         contextText,
         this.project
       );
+
+      lastStepOutput = (result.result ?? result.error ?? "").slice(0, 4000);
 
       // For test-like steps, detect failure from agent output text even when
       // the agent process exited with code 0 (the agent "successfully" reported
@@ -488,7 +501,7 @@ IMPORTANT:
         );
         console.log(`\n🛑 PIPELINE BLOCKED AT: ${step.id} (infrastructure failure)`);
         console.log(`STATUS: blocked`);
-        return;
+        return { status: "failed", output: lastStepOutput };
       }
 
       if (isTestStep(step)) {
@@ -518,7 +531,7 @@ IMPORTANT:
           step.id
         );
         console.log(`\n🛑 PIPELINE FAILED AT: ${step.id} (after bugfix loop)`);
-        return;
+        return { status: "failed", output: (retest.error ?? retest.result ?? "").slice(0, 4000) };
       }
 
       await context.addError(
@@ -527,7 +540,7 @@ IMPORTANT:
       );
       console.log(`\n🛑 PIPELINE STOPPED AT: ${step.id}`);
       console.log(`STATUS: failed`);
-      return;
+      return { status: "failed", output: lastStepOutput };
     }
 
     await context.setSuccess();
@@ -537,6 +550,8 @@ IMPORTANT:
 ║        ✅ PIPELINE COMPLETE          ║
 ╚══════════════════════════════════════╝
 `);
+
+    return { status: "passed", output: lastStepOutput };
   }
 }
 
@@ -555,7 +570,7 @@ export async function runGoal(
     fromStep?: string;
     model?: string;
   }
-): Promise<void> {
+): Promise<GoalResult> {
   const pipelineId = randomUUID().slice(0, 8);
 
   const pipeline = selectPipeline(goal, opts?.pipelineType);
@@ -576,5 +591,5 @@ export async function runGoal(
 
   await runner.init();
 
-  await runner.run(pipeline);
+  return runner.run(pipeline);
 }

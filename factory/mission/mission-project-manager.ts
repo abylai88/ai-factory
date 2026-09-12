@@ -149,7 +149,7 @@ export class DefaultInnerFactoryAdapter implements InnerFactoryAdapter {
     mission: Mission,
     config: { baseDir: string; project: string; fromStep?: string; model?: string }
   ): Promise<AgentResult> {
-    await runGoal(
+    const goalResult = await runGoal(
       delegation.description,
       config.baseDir,
       config.project,
@@ -166,8 +166,8 @@ export class DefaultInnerFactoryAdapter implements InnerFactoryAdapter {
 
     return {
       delegationId: delegation.id,
-      status: "passed",
-      output: "",
+      status: goalResult.status,
+      output: goalResult.output,
       durationMs: 0,
     };
   }
