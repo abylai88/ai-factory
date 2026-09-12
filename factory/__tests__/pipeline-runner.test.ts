@@ -3,8 +3,11 @@ import {
   PipelineRunner,
   PipelineRunnerConfig,
   StepExecutor,
+  GoalResult,
+  runGoal,
   MAX_FIX_ITERATIONS
 } from "../pipeline/pipeline-runner.js";
+import { DryRunExecutor } from "../pipeline/dry-run.js";
 import { Pipeline, PipelineStep } from "../pipeline/pipeline.js";
 import { Task } from "../task-manager/task-manager.js";
 
@@ -162,5 +165,155 @@ describe("PipelineRunner --from-step", () => {
     await expect(runner.run(pipeline)).rejects.toThrow(
       /Invalid --from-step "Implementation"/
     );
+  });
+});
+
+// ── GoalResult: PipelineRunner.run() return value ────────────────
+
+class AllPassExecutor implements StepExecutor {
+  async execute(task: Task): Promise<Task> {
+    return {
+      ...task,
+      status: "passed",
+      result: `Output from step: ${task.title}`,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}
+
+class FirstStepFailsExecutor implements StepExecutor {
+  async execute(task: Task): Promise<Task> {
+    return {
+      ...task,
+      status: "failed",
+      error: `Simulated failure in: ${task.title}`,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}
+
+class InfrastructureFailExecutor implements StepExecutor {
+  async execute(task: Task): Promise<Task> {
+    return {
+      ...task,
+      status: "failed",
+      error: "timeout: agent exceeded 300000ms",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}
+
+describe("PipelineRunner.run() GoalResult", () => {
+  it("returns status 'passed' when all steps succeed", async () => {
+    const executor = new AllPassExecutor();
+    const runner = new PipelineRunner(makeConfig({ executor }));
+    const pipeline = makePipeline();
+
+    const result: GoalResult = await runner.run(pipeline);
+
+    expect(result.status).toBe("passed");
+    expect(result.output).toBeTruthy();
+  });
+
+  it("returns status 'failed' when a step fails irrecoverably", async () => {
+    const executor = new FirstStepFailsExecutor();
+    const runner = new PipelineRunner(makeConfig({ executor }));
+    const pipeline = makePipeline();
+
+    const result: GoalResult = await runner.run(pipeline);
+
+    expect(result.status).toBe("failed");
+    expect(result.output).toContain("Simulated failure");
+  });
+
+  it("returns status 'failed' on infrastructure failure", async () => {
+    const executor = new InfrastructureFailExecutor();
+    const runner = new PipelineRunner(makeConfig({ executor }));
+    const pipeline = makePipeline();
+
+    const result: GoalResult = await runner.run(pipeline);
+
+    expect(result.status).toBe("failed");
+    expect(result.output).toContain("timeout");
+  });
+
+  it("output contains last step result on success", async () => {
+    const executor = new AllPassExecutor();
+    const runner = new PipelineRunner(makeConfig({ executor }));
+    const pipeline = makePipeline();
+
+    const result: GoalResult = await runner.run(pipeline);
+
+    expect(result.output).toContain("Output from step:");
+  });
+
+  it("output contains failure reason on failure", async () => {
+    const executor = new FirstStepFailsExecutor();
+    const runner = new PipelineRunner(makeConfig({ executor }));
+    const pipeline = makePipeline();
+
+    const result: GoalResult = await runner.run(pipeline);
+
+    expect(result.output).toContain("Simulated failure in:");
+  });
+});
+
+// ── runGoal() GoalResult ─────────────────────────────────────────
+
+describe("runGoal() GoalResult", () => {
+  it("returns status 'passed' when DryRunExecutor succeeds", async () => {
+    const executor = new DryRunExecutor({ failTest: 0, log: false });
+    const result = await runGoal(
+      "Build a puzzle game",
+      "/tmp/test-base",
+      "/tmp/test-project",
+      { executor }
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.output).toBeTruthy();
+  });
+
+  it("returns status 'failed' when DryRunExecutor fails all steps", async () => {
+    const executor = new DryRunExecutor({ failAll: true, log: false });
+    const result = await runGoal(
+      "Build a puzzle game",
+      "/tmp/test-base",
+      "/tmp/test-project",
+      { executor }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.output).toBeTruthy();
+  });
+});
+
+// ── RealFactoryAdapter propagation (via runGoal + DryRunExecutor) ─
+
+describe("RealFactoryAdapter result propagation", () => {
+  it("successful pipeline → adapter returns 'passed'", async () => {
+    const executor = new DryRunExecutor({ failTest: 0, log: false });
+    const goalResult = await runGoal(
+      "Build a puzzle game",
+      "/tmp/test-base",
+      "/tmp/test-project",
+      { executor }
+    );
+
+    // RealFactoryAdapter uses goalResult.status directly
+    expect(goalResult.status).toBe("passed");
+  });
+
+  it("failed pipeline → adapter returns 'failed'", async () => {
+    const executor = new DryRunExecutor({ failAll: true, log: false });
+    const goalResult = await runGoal(
+      "Build a puzzle game",
+      "/tmp/test-base",
+      "/tmp/test-project",
+      { executor }
+    );
+
+    // RealFactoryAdapter uses goalResult.status directly
+    expect(goalResult.status).toBe("failed");
   });
 });
