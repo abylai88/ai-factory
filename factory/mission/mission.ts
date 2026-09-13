@@ -374,6 +374,7 @@ export const MissionEventSchema = z.object({
     "delegation.recovery.completed",
     "delegation.recovery.failed",
     "delegation.escalated",
+    "mission.resumed",
   ]),
   payload: z.record(z.string(), z.unknown()),
 });

@@ -362,6 +362,11 @@ export class MissionState {
           reason: String(payload.reason),
         });
         break;
+
+      case "mission.resumed":
+        // Mission was resumed — update status to running
+        this.mission.status = "running";
+        break;
     }
 
     this.mission.updatedAt = new Date().toISOString();
@@ -622,6 +627,86 @@ export class MissionState {
       type: "mission.repair.failed",
       payload: { repairPlanId, cycle, error },
     });
+  }
+
+  /**
+   * Prepare a failed/crashed mission for resume.
+   * Resets running and failed delegations to queued so they can be retried.
+   * Returns the loaded mission and plan for use by the orchestrator.
+   */
+  async prepareForResume(): Promise<{ mission: Mission; plan: ExecutionPlan | null; delegations: Delegation[] }> {
+    // Reset "running" delegations to "queued" — they were interrupted
+    // Reset "failed" delegations to "queued" — they should be retried on resume
+    // Reset "blocked" delegations to "queued" — their deps may now be satisfied
+    let resetCount = 0;
+    for (const del of this.delegations) {
+      if (del.status === "running" || del.status === "failed" || del.status === "blocked") {
+        del.status = "queued";
+        del.startedAt = undefined;
+        del.pipelineId = undefined;
+        del.error = undefined;
+        resetCount++;
+      }
+    }
+
+    // Set mission status to running for resume
+    if (this.mission.status === "failed" || this.mission.status === "blocked" || this.mission.status === "cancelled" || this.mission.status === "running") {
+      this.mission.status = "running";
+    }
+
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.resumed" as any,
+      payload: {
+        resetDelegations: resetCount,
+        previousStatus: this.mission.status,
+      },
+    });
+
+    return {
+      mission: { ...this.mission },
+      plan: this.plan ? { ...this.plan } : null,
+      delegations: this.delegations.map((d) => ({ ...d })),
+    };
+  }
+
+  /**
+   * Check if a delegation has a partially produced artifact on disk.
+   * Used during resume to determine if a delegation should be repaired
+   * rather than re-run from scratch.
+   */
+  hasDelegationArtifact(delegationId: string): boolean {
+    const del = this.delegations.find((d) => d.id === delegationId);
+    if (!del) return false;
+    // Check if the delegation has outputs or a result with content
+    if (del.outputs && del.outputs.length > 0) return true;
+    if (del.result && del.result.length > 0) return true;
+    return false;
+  }
+
+  /**
+   * Get all delegations that are eligible for resume processing.
+   * Returns delegations that are not in a terminal success state.
+   */
+  getResumableDelegations(): Delegation[] {
+    return this.delegations.filter((d) => d.status !== "passed");
+  }
+
+  /**
+   * Build the initial completed/failed sets from persisted state.
+   * Used by the orchestrator to skip already-completed work on resume.
+   */
+  getResumeState(): { completed: Set<string>; failed: Set<string> } {
+    const completed = new Set<string>();
+    const failed = new Set<string>();
+    for (const del of this.delegations) {
+      if (del.status === "passed") {
+        completed.add(del.id);
+      } else if (del.status === "failed" || del.status === "blocked") {
+        failed.add(del.id);
+      }
+    }
+    return { completed, failed };
   }
 
   isTerminal(): boolean {

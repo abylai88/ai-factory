@@ -68,6 +68,8 @@ export interface OrchestratorConfig {
   maxDelegationDurationMs?: number;
   // Global mission timeout
   maxMissionDurationMs?: number;
+  // Resume mode: skip startMission, use persisted state
+  resume?: boolean;
 }
 
 const DEFAULT_MAX_REPAIRS = 3;
@@ -114,6 +116,7 @@ export class MissionOrchestrator {
       maxDelegationDurationMs: config.maxDelegationDurationMs,
       maxMissionDurationMs: config.maxMissionDurationMs,
       supervisor: config.supervisor,
+      resume: config.resume,
     };
 
     // Fail fast if peer review is enabled but no review executor is provided
@@ -138,7 +141,12 @@ export class MissionOrchestrator {
     this.dynamicDelegationCount = 0;
     this.replanCount = 0;
 
-    await this.config.missionState.startMission();
+    if (this.config.resume) {
+      // Resume mode: mission was already started, don't emit started event again.
+      // The prepareForResume() call in the CLI already set status to running.
+    } else {
+      await this.config.missionState.startMission();
+    }
 
     // Phase 9: Emit supervisor started event
     this.publisher.publish({
@@ -262,14 +270,29 @@ export class MissionOrchestrator {
 
   private async executeDelegationGraph(allDelegations: Delegation[]): Promise<boolean> {
     const delegations = [...allDelegations];
+
+    // Initialize completed/failed sets from persisted state for resume support.
+    // On fresh missions, these sets are empty. On resume, they contain
+    // delegations that already completed successfully or failed permanently.
     const completed = new Set<string>();
     const failed = new Set<string>();
+
+    if (this.config.resume) {
+      const resumeState = this.config.missionState.getResumeState();
+      for (const id of resumeState.completed) completed.add(id);
+      for (const id of resumeState.failed) failed.add(id);
+    }
 
     while (delegations.length > 0 && this.isRunning) {
       const ready: Delegation[] = [];
       const waiting: Delegation[] = [];
 
       for (const del of delegations) {
+        // Skip delegations that already completed (resume support)
+        if (completed.has(del.id) || failed.has(del.id)) {
+          continue;
+        }
+
         const depsMet = del.dependsOn.every((depId) => completed.has(depId));
         const depsNotFailed = del.dependsOn.every((depId) => !failed.has(depId));
 
@@ -1645,6 +1668,9 @@ export class MissionOrchestrator {
   }
 
   async repairDelegation(delegation: Delegation, auditResult: AuditResult): Promise<boolean> {
+    // If maxRepairs is 0, skip repair entirely
+    if (this.config.maxRepairs <= 0) return false;
+
     // Check if there's an existing repair plan in MissionState (e.g., after restart)
     const existingRepairPlan = this.config.missionState.getRepairPlan(delegation.id);
     let repairPlan: RepairPlan;
@@ -1662,7 +1688,7 @@ export class MissionOrchestrator {
         delegation.id,
         auditResult.recommendedRepair?.description ?? `Fix issues in ${delegation.title}`,
         auditResult.recommendedRepair?.focusAreas ?? ["Unknown"],
-        this.config.maxRepairs
+        Math.max(1, this.config.maxRepairs)
       );
       startIteration = 1;
     }

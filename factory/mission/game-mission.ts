@@ -85,7 +85,7 @@ export async function executeGameMission(
     baseDir,
     templatesDir: `${baseDir}/templates`,
     projectsDir: `${baseDir}/projects`,
-    allowedTemplateIds: ["yagames-phaser-template"],
+    allowedTemplateIds: ["phaser-generic-web-template", "yagames-phaser-template"],
   });
   
   let projectId: string;
@@ -102,7 +102,7 @@ export async function executeGameMission(
     projectPath = projectPathCandidate;
   } else {
     // Provision new project
-    const templateId = input.templateId || "yagames-phaser-template";
+    const templateId = input.templateId || "phaser-generic-web-template";
     const handle = await provisioner.provision(templateId);
     projectId = handle.projectId;
     projectPath = handle.projectPath;
@@ -113,7 +113,7 @@ export async function executeGameMission(
     projectId,
     engine: "web",
     stack: "phaser",
-    template: input.templateId || "yagames-phaser-template",
+    template: input.templateId || "phaser-generic-web-template",
     workspace: projectPath,
     requiresVisualQa: workflowMode === "game",
   };

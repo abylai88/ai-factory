@@ -290,7 +290,7 @@ describe("executeGameMission", () => {
     const result = await executeGameMission(input);
     expect(result.projectId).toBe("test-project-123");
     expect(result.projectPath).toBe("/projects/test-project-123");
-    expect(mockProvisioner.provision).toHaveBeenCalledWith("yagames-phaser-template");
+    expect(mockProvisioner.provision).toHaveBeenCalledWith("phaser-generic-web-template");
   });
 
   it("should resolve an existing project when projectId is provided", async () => {

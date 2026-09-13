@@ -107,4 +107,5 @@ export const MissionEventTypes = {
   DELEGATION_RECOVERY_COMPLETED: "delegation.recovery.completed",
   DELEGATION_RECOVERY_FAILED: "delegation.recovery.failed",
   DELEGATION_ESCALATED: "delegation.escalated",
+  MISSION_RESUMED: "mission.resumed",
 } as const;

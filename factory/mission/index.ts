@@ -29,7 +29,7 @@ import { createModelRouter } from "./model-router.js";
 import { createMissionSupervisor } from "./mission-supervisor.js";
 import { PeerReviewSystem } from "./peer-review.js";
 
-const ALLOWED_TEMPLATES = ["yagames-phaser-template"] as const;
+const ALLOWED_TEMPLATES = ["phaser-generic-web-template", "yagames-phaser-template"] as const;
 
 function parseArgs(argv: string[]): {
   command: string;
@@ -117,6 +117,7 @@ function printUsage(): void {
 Usage:
   npx tsx factory/mission/index.ts run "Goal" [options]
   npm run mission -- run "Goal" [options]
+  npm run mission -- resume <mission-id> [options]
   npm run mission -- diagnose <mission-id>
   npm run mission -- list-templates
 
@@ -130,14 +131,19 @@ Options:
   --dry-run             Show mission plan, do NOT execute
   --read-only           Execute read-only investigation (no file modifications)
   --force               Replace existing workspace (DESTROYS content)
-  --from-step <id>      Resume pipeline from this step ID
+  --from-step <id>      Resume pipeline from this step ID (manual override)
   --mission-id <id>     Mission ID for diagnose command
+
+Resume Options:
+  --from-step <id>      Override resume point (default: auto-detect from state)
 
 Examples:
   npm run mission -- run "Build a platformer game"
   npm run mission -- run "Fix TypeScript errors" --dry-run
   npm run mission -- run "Add new level" --project-id traffic-dodge
   npm run mission -- run "Inspect project architecture" --read-only --project-id traffic-dodge
+  npm run mission -- resume mission-abc12345
+  npm run mission -- resume mission-abc12345 --from-step build-step
   npm run mission -- diagnose mission-abc12345
   npm run mission -- list-templates
 `);
@@ -165,7 +171,7 @@ async function setupWorkspace(
   }
 
   const setup = new TemplateManager(baseDir);
-  const template = await setup.templateFor(goalEngine);
+  const template = await setup.templateFor(goalEngine, goal);
 
   if (!template) {
     throw new Error("No embedded template found for WEB projects.");
@@ -331,6 +337,160 @@ async function main(): Promise<void> {
     console.log(`  ${repairPlan.verificationPlan.description}`);
 
     console.log("\n🔒 Safety: PASS (no violations)");
+    return;
+  }
+
+  // ─── Resume Command ──────────────────────────────────────────────
+  if (command === "resume") {
+    const baseDir = path.resolve(process.env.AI_FACTORY_HOME ?? process.cwd());
+    const mid = goal || missionId;
+    if (!mid) {
+      console.error("Usage: npm run mission -- resume <mission-id>");
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(`
+╔══════════════════════════════════════╗
+║      🔄 MISSION RESUME              ║
+╚══════════════════════════════════════╝
+`);
+    console.log(`🔄 Resuming mission: ${mid}`);
+
+    const missionState = new MissionState(baseDir, mid);
+    await missionState.init();
+
+    const mission = missionState.getMission();
+    if (!mission.id || mission.status === "draft") {
+      console.error(`Mission ${mid} not found or not yet executed.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (mission.status === "completed") {
+      console.log(`✅ Mission ${mid} is already completed. Nothing to resume.`);
+      return;
+    }
+
+    // Show current progress before resume
+    const progressBefore = missionState.getProgress();
+    console.log(`📊 Progress before resume: ${progressBefore.completed}/${progressBefore.total} delegations passed`);
+    console.log(`📌 Status: ${mission.status}`);
+
+    // Prepare state for resume: reset running delegations, set status
+    const { plan, delegations } = await missionState.prepareForResume();
+
+    if (!plan) {
+      console.error(`Mission ${mid} has no execution plan. Cannot resume.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const workspaceDir = mission.context?.workspace;
+    if (!workspaceDir) {
+      console.error(`Mission ${mid} has no workspace path in context. Cannot resume.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(`📁 Workspace: ${workspaceDir}`);
+    console.log(`📋 Plan: ${plan.id} (${plan.delegations.length} delegations)`);
+
+    // Count how many delegations are already done
+    const resumeState = missionState.getResumeState();
+    console.log(`✅ Already completed: ${resumeState.completed.size}`);
+    console.log(`❌ Already failed/blocked: ${resumeState.failed.size}`);
+    console.log(`🔄 Will resume: ${delegations.length - resumeState.completed.size - resumeState.failed.size} delegations`);
+
+    // Validate workspace exists
+    const fs = await import("node:fs/promises");
+    try {
+      await fs.access(workspaceDir);
+    } catch {
+      console.error(`❌ Workspace not found: ${workspaceDir}`);
+      console.error("The project directory may have been moved or deleted.");
+      process.exitCode = 1;
+      return;
+    }
+
+    const provisioner = new ProjectProvisioner({
+      baseDir,
+      templatesDir: path.join(baseDir, "templates"),
+      projectsDir: path.join(baseDir, "projects"),
+      allowedTemplateIds: ALLOWED_TEMPLATES,
+    });
+    const projectManager = new MissionProjectManager({ baseDir, provisioner });
+
+    const eventSink = new InMemoryEventSink();
+    const publisher = createMissionEventPublisher(eventSink);
+    const modelRouter = createModelRouter();
+
+    const supervisor = createMissionSupervisor({
+      missionState,
+      eventSink,
+      publisher,
+      modelRouter,
+    });
+
+    const validation = {
+      buildCommand: "npm run build",
+      timeoutMs: 120_000,
+      maxRepairAttempts: 3,
+    };
+
+    const pixelOfficeReporter = createPixelOfficeReporter(eventSink, console.log);
+    if (pixelOfficeReporter) {
+      pixelOfficeReporter.start();
+    }
+
+    const innerAdapter = new RealFactoryAdapter();
+    const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager }, innerAdapter);
+    const auditor = new DeterministicAuditor();
+
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs,
+      baseDir,
+      project: workspaceDir,
+      factoryAdapter,
+      auditor,
+      eventSink,
+      missionState,
+      modelRouter,
+      validation,
+      supervisor,
+      resume: true,
+    });
+
+    console.log("\n🚀 Resuming mission execution...\n");
+
+    try {
+      const finalMission = await orchestrator.executeMission(mission, plan);
+
+      console.log("\n╔══════════════════════════════════════╗");
+      console.log(`║  ${finalMission.status === "completed" ? "✅ MISSION COMPLETED" : "❌ MISSION FAILED"}  ║`);
+      console.log("╚══════════════════════════════════════╝");
+      console.log(`Status: ${finalMission.status}`);
+
+      const progressAfter = missionState.getProgress();
+      console.log(`Progress: ${progressAfter.completed}/${progressAfter.total} delegations passed`);
+      console.log(`Resumed from: ${resumeState.completed.size} previously completed`);
+
+      const events = eventSink.recent();
+      if (events.length > 0) {
+        console.log(`\n📡 Events emitted: ${events.length}`);
+      }
+
+      if (finalMission.status === "failed") {
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      console.error("\n❌ MISSION RESUME ERROR:");
+      console.error(error instanceof Error ? error.message : error);
+      await missionState.completeMission("failed");
+      process.exitCode = 1;
+    } finally {
+      pixelOfficeReporter?.stop();
+    }
     return;
   }
 

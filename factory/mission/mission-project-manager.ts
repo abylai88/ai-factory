@@ -67,7 +67,7 @@ export class MissionProjectManager {
       }
     }
 
-    const templateId = existing?.template ?? "yagames-phaser-template";
+    const templateId = existing?.template ?? "phaser-generic-web-template";
     const handle = await this.config.provisioner.provision(templateId, existing?.projectId);
 
     return {
