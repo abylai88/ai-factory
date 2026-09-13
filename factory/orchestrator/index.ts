@@ -186,7 +186,7 @@ async function main(): Promise<void> {
   }
 
   const setup = new TemplateManager(baseDir);
-  const template = await setup.templateFor(goalEngine);
+  const template = await setup.templateFor(goalEngine, goal);
 
   if (!template) {
     console.log("\n🛑 No embedded template found for WEB projects.");
@@ -338,7 +338,7 @@ async function main(): Promise<void> {
     baseDir,
     templatesDir: path.join(baseDir, "templates"),
     projectsDir: path.join(baseDir, "projects"),
-    allowedTemplateIds: ["yagames-phaser-template"],
+    allowedTemplateIds: ["phaser-generic-web-template", "yagames-phaser-template"],
   });
   const projectManager = new MissionProjectManager({ baseDir, provisioner });
   const innerAdapter = new RealFactoryAdapter();

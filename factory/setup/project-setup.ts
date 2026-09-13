@@ -39,6 +39,18 @@ export interface SetupResult {
 
 const EXCLUDE_DIRS = new Set(["node_modules", ".git", ".git2", "dist", "build"]);
 
+/** Maximum allowed slug length to avoid ENAMETOOLONG on common filesystems. */
+export const SLUG_MAX_LENGTH = 64;
+
+/** Template ID for the clean generic Phaser web game template. */
+export const GENERIC_TEMPLATE_ID = "phaser-generic-web-template";
+
+/** Template ID for the legacy Yandex-specific Phaser template. */
+export const LEGACY_TEMPLATE_ID = "yagames-phaser-template";
+
+/** Keywords that indicate the goal is explicitly for Yandex Games platform. */
+const YANDEX_KEYWORDS = ["yandex", "ya-games", "yagames", "яндекс"];
+
 /**
  * Project-local OpenCode agents that are deployed into every generated
  * project at <project>/.opencode/agents/ so that when TaskRunner launches
@@ -95,12 +107,20 @@ export class TemplateManager {
   }
 
   /** Build the template descriptor for a WEB project. */
-  async templateFor(engine: EngineInfo): Promise<TemplateDescriptor | null> {
+  async templateFor(engine: EngineInfo, goal?: string): Promise<TemplateDescriptor | null> {
     if (engine.kind !== "web" || !engine.supported) {
       return null;
     }
 
-    const candidates = ["yagames-phaser-template"];
+    // Determine candidate order based on goal content:
+    //  - If the goal mentions Yandex, prefer the legacy Yandex template first.
+    //  - Otherwise, prefer the clean generic template first.
+    const lowerGoal = (goal ?? "").toLowerCase();
+    const isYandexGoal = YANDEX_KEYWORDS.some((kw) => lowerGoal.includes(kw));
+
+    const candidates = isYandexGoal
+      ? [LEGACY_TEMPLATE_ID, GENERIC_TEMPLATE_ID]
+      : [GENERIC_TEMPLATE_ID, LEGACY_TEMPLATE_ID];
 
     for (const id of candidates) {
       const dir = path.join(this.templatesDir, id);
@@ -343,12 +363,13 @@ async function deployProjectConfig(projectDir: string): Promise<void> {
 
 /** Convenience: resolve the default project workspace dir from a goal. */
 export function goalSlug(goal: string): string {
-  return (
+  const slug = (
     goal
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "project"
   );
+  return slug.length > SLUG_MAX_LENGTH ? slug.slice(0, SLUG_MAX_LENGTH).replace(/-+$/, "") : slug;
 }
 
 /** Compute the isolated workspace path under <base>/projects/<slug>. */
