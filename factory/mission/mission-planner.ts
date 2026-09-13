@@ -4,6 +4,40 @@ import { createExecutionPlan, createDelegation } from "./mission.js";
 import type { MissionMemory } from "./mission-memory.js";
 import { Planner } from "./planner.js";
 
+// ── Allowed Build/Test Commands ──────────────────────────────────
+// Prevent prompt injection via planner-generated commands.
+// Only allow known-safe npm/npx commands used in the project.
+
+const ALLOWED_BUILD_COMMANDS = [
+  "npm run build",
+  "npm run build:prod",
+  "npm run build:dev",
+  "npm run build:staging",
+  "npx tsc",
+  "npx tsc --noEmit",
+];
+
+const ALLOWED_TEST_COMMANDS = [
+  "npm test",
+  "npm run test",
+  "npm run test:unit",
+  "npm run test:integration",
+  "npm run test:e2e",
+  "npx vitest run",
+  "npx vitest",
+  "npx playwright test",
+];
+
+function validateBuildCommand(cmd: string): boolean {
+  const trimmed = cmd.trim();
+  return ALLOWED_BUILD_COMMANDS.some(allowed => trimmed === allowed || trimmed.startsWith(allowed + " "));
+}
+
+function validateTestCommand(cmd: string): boolean {
+  const trimmed = cmd.trim();
+  return ALLOWED_TEST_COMMANDS.some(allowed => trimmed === allowed || trimmed.startsWith(allowed + " "));
+}
+
 // ── Planning Model Interface ──────────────────────────────────
 
 export interface PlanningModel {
@@ -353,12 +387,23 @@ function convertToDelegation(mission: Mission, pd: PlannedDelegation): Delegatio
   descriptionParts.push(pd.task);
 
   if (pd.validation?.buildCommand) {
-    descriptionParts.push("");
-    descriptionParts.push(`BUILD_COMMAND: ${pd.validation.buildCommand}`);
+    const cmd = pd.validation.buildCommand.trim();
+    if (validateBuildCommand(cmd)) {
+      descriptionParts.push("");
+      descriptionParts.push(`BUILD_COMMAND: ${cmd}`);
+    } else {
+      // Log warning but don't include invalid command in delegation
+      console.warn(`[MissionPlanner] Rejected invalid buildCommand: ${cmd}`);
+    }
   }
   if (pd.validation?.testCommand) {
-    descriptionParts.push("");
-    descriptionParts.push(`TEST_COMMAND: ${pd.validation.testCommand}`);
+    const cmd = pd.validation.testCommand.trim();
+    if (validateTestCommand(cmd)) {
+      descriptionParts.push("");
+      descriptionParts.push(`TEST_COMMAND: ${cmd}`);
+    } else {
+      console.warn(`[MissionPlanner] Rejected invalid testCommand: ${cmd}`);
+    }
   }
 
   const acceptanceCriteria = pd.validation?.acceptanceCriteria ?? [
@@ -387,8 +432,16 @@ function convertToDelegation(mission: Mission, pd: PlannedDelegation): Delegatio
   );
 
   // Preserve the original planned ID for dependency tracking
-  delegation.id = pd.id;
+  // Validate ID: must be unique within plan and not collide with deterministic pattern
+  const deterministicPattern = /^del-[a-f0-9]{8}$/;
+  if (deterministicPattern.test(pd.id)) {
+    // LLM provided an ID that looks like our deterministic format - regenerate to avoid collision
+    delegation.id = `llm-${pd.id}`;
+  } else {
+    delegation.id = pd.id;
+  }
 
+  // Check for duplicates within the plan (will be validated later by validatePlanStructure)
   return delegation;
 }
 

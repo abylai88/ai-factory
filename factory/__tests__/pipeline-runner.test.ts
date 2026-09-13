@@ -14,7 +14,7 @@ import { Task } from "../task-manager/task-manager.js";
 class MockExecutor implements StepExecutor {
   public executedSteps: string[] = [];
 
-  async execute(task: Task, _contextText: string, _project: string): Promise<Task> {
+  async execute(task: Task, _contextText: string, _project: string, _signal?: AbortSignal): Promise<Task> {
     this.executedSteps.push(task.title);
     return {
       ...task,
@@ -171,7 +171,7 @@ describe("PipelineRunner --from-step", () => {
 // ── GoalResult: PipelineRunner.run() return value ────────────────
 
 class AllPassExecutor implements StepExecutor {
-  async execute(task: Task): Promise<Task> {
+  async execute(task: Task, _contextText?: string, _project?: string, _signal?: AbortSignal): Promise<Task> {
     return {
       ...task,
       status: "passed",
@@ -182,7 +182,7 @@ class AllPassExecutor implements StepExecutor {
 }
 
 class FirstStepFailsExecutor implements StepExecutor {
-  async execute(task: Task): Promise<Task> {
+  async execute(task: Task, _contextText?: string, _project?: string, _signal?: AbortSignal): Promise<Task> {
     return {
       ...task,
       status: "failed",
@@ -193,7 +193,7 @@ class FirstStepFailsExecutor implements StepExecutor {
 }
 
 class InfrastructureFailExecutor implements StepExecutor {
-  async execute(task: Task): Promise<Task> {
+  async execute(task: Task, _contextText?: string, _project?: string, _signal?: AbortSignal): Promise<Task> {
     return {
       ...task,
       status: "failed",

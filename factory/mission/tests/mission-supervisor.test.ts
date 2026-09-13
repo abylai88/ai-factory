@@ -185,7 +185,7 @@ describe("Phase 9: MissionSupervisor - Orchestrator Integration", () => {
         factoryAdapter: {
           runDelegation: async () => {
             // Simulate long-running delegation that exceeds stuck threshold
-            await new Promise((r) => setTimeout(r, 100));
+            await new Promise((r) => setTimeout(r, 200));
             return makeResult("d1", "passed", "Success");
           },
         } as any,
@@ -198,10 +198,10 @@ describe("Phase 9: MissionSupervisor - Orchestrator Integration", () => {
 
       const result = await orchestrator.executeMission(mission, plan);
 
-      // Delegation ran for 100ms but maxDelegationDurationMs is 50ms
-      // Stuck detection fires after executeDelegation completes, overriding the result
-      expect(result.status).toBe("failed");
-      // Supervisor should have received a stuck delegation notification
+      // Stuck detection operates during execution via background interval.
+      // Supervisor detects stuck delegation and triggers REPAIR recovery.
+      // Repair succeeds (factory adapter returns passed), so mission completes.
+      expect(result.status).toBe("completed");
       const decisions = supervisor.getDecisions();
       expect(decisions.some((d) => d.reason === "stuck")).toBe(true);
     });
@@ -398,14 +398,15 @@ describe("Phase 9: MissionSupervisor", () => {
       const mission = config.missionState.getMission();
       const del = makeDelegation(mission.id, "d1");
 
+      // Capture monotonic time when delegation starts
+      const startMonotonic = performance.now();
       supervisor.observeDelegationStarted(del);
 
-      // Not stuck yet (59 seconds)
-      const now = new Date(del.createdAt!).getTime();
-      expect(supervisor.checkStuckDelegations(now + 59000)).toEqual([]);
+      // Not stuck yet (59 seconds = 59000ms)
+      expect(supervisor.checkStuckDelegations(startMonotonic + 59000)).toEqual([]);
 
-      // Stuck after 61 seconds
-      expect(supervisor.checkStuckDelegations(now + 61000)).toEqual([del.id]);
+      // Stuck after 61 seconds (61000ms)
+      expect(supervisor.checkStuckDelegations(startMonotonic + 61000)).toEqual([del.id]);
     });
   });
 
@@ -416,11 +417,11 @@ describe("Phase 9: MissionSupervisor", () => {
       const mission = config.missionState.getMission();
       const del = makeDelegation(mission.id, "d1");
 
+      const startMonotonic = performance.now();
       supervisor.observeDelegationStarted(del);
       supervisor.observeDelegationCompleted(del.id, makeResult(del.id, "passed"));
 
-      const now = new Date(del.createdAt!).getTime();
-      expect(supervisor.checkStuckDelegations(now + 120000)).toEqual([]);
+      expect(supervisor.checkStuckDelegations(startMonotonic + 120000)).toEqual([]);
     });
 
     it("does not mark queued delegation as stuck", () => {
@@ -428,8 +429,7 @@ describe("Phase 9: MissionSupervisor", () => {
       const supervisor = new MissionSupervisor(config);
 
       // Don't call observeDelegationStarted — status defaults to "queued"
-      const now = Date.now();
-      expect(supervisor.checkStuckDelegations(now + 120000)).toEqual([]);
+      expect(supervisor.checkStuckDelegations(performance.now() + 120000)).toEqual([]);
     });
   });
 

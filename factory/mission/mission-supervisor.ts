@@ -39,6 +39,7 @@ export interface SupervisorDecision {
 export interface DelegationTrackingState {
   delegationId: string;
   startedAt: string;
+  startedAtMonotonic: number; // Monotonic time (performance.now()) for stuck detection
   lastActivityAt: string;
   status: string;
   failureCount: number;
@@ -122,9 +123,11 @@ export class MissionSupervisor {
    */
   observeDelegationStarted(delegation: Delegation): void {
     const now = new Date().toISOString();
+    const nowMonotonic = performance.now();
     this.delegationStates.set(delegation.id, {
       delegationId: delegation.id,
       startedAt: now,
+      startedAtMonotonic: nowMonotonic,
       lastActivityAt: now,
       status: "running",
       failureCount: 0,
@@ -274,16 +277,19 @@ export class MissionSupervisor {
   /**
    * Check all active delegations for stuck state.
    * Returns IDs of delegations that are stuck.
+   * Uses monotonic time (performance.now()) to avoid issues with wall clock changes.
    */
   checkStuckDelegations(currentTimeMs?: number): string[] {
-    const now = currentTimeMs ?? Date.now();
+    // Use monotonic time for elapsed calculation
+    const nowMonotonic = currentTimeMs ?? performance.now();
     const stuckDelegationIds: string[] = [];
 
     for (const [delegationId, state] of this.delegationStates) {
       if (state.status !== "running") continue;
 
-      const startedAtMs = new Date(state.startedAt).getTime();
-      const elapsed = now - startedAtMs;
+      // Use monotonic start time if available, fall back to wall clock
+      const startedAtMonotonic = state.startedAtMonotonic ?? new Date(state.startedAt).getTime();
+      const elapsed = nowMonotonic - startedAtMonotonic;
 
       if (elapsed > this.config.maxDelegationDurationMs) {
         stuckDelegationIds.push(delegationId);

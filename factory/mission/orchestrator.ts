@@ -36,7 +36,7 @@ import { isModelProviderFailure } from "./model-failure-classifier.js";
 import { randomUUID } from "node:crypto";
 
 export interface FactoryExecutionAdapter {
-  runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string }): Promise<AgentResult>;
+  runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }): Promise<AgentResult>;
 }
 
 export interface Auditor {
@@ -66,9 +66,15 @@ export interface OrchestratorConfig {
   // Phase 9: Supervisor
   supervisor?: MissionSupervisor;
   maxDelegationDurationMs?: number;
+  // Global mission timeout
+  maxMissionDurationMs?: number;
 }
 
 const DEFAULT_MAX_REPAIRS = 3;
+// Cap output at 10MB to prevent memory exhaustion from runaway agent output
+const MAX_OUTPUT_CHARS = 10_000_000;
+// Default global mission timeout: 2 hours
+const DEFAULT_MAX_MISSION_DURATION_MS = 2 * 60 * 60 * 1000;
 
 export class MissionOrchestrator {
   private readonly config: OrchestratorConfig;
@@ -84,6 +90,7 @@ export class MissionOrchestrator {
   private replanCount = 0;
   private artifactStore: ArtifactStore | null = null;
   private delegationStartTimes = new Map<string, number>();
+  private currentAbortController: AbortController | null = null;
 
   constructor(config: OrchestratorConfig) {
     this.config = {
@@ -101,12 +108,22 @@ export class MissionOrchestrator {
       validation: config.validation,
       replanner: config.replanner,
       peerReview: config.peerReview,
-      reviewExecutor: config.reviewExecutor ?? defaultReviewExecutor,
+      reviewExecutor: config.reviewExecutor,
       modelRouter: config.modelRouter,
       maxModelFallbackAttempts: config.maxModelFallbackAttempts,
       maxDelegationDurationMs: config.maxDelegationDurationMs,
+      maxMissionDurationMs: config.maxMissionDurationMs,
       supervisor: config.supervisor,
     };
+
+    // Fail fast if peer review is enabled but no review executor is provided
+    if (this.config.peerReview && !this.config.reviewExecutor) {
+      throw new Error(
+        "Peer review is enabled but no reviewExecutor is configured. " +
+        "A real ReviewExecutor must be provided for production use. " +
+        "For tests, provide a mock executor that returns passed: true."
+      );
+    }
     this.publisher = createMissionEventPublisher(this.config.eventSink);
     this.validationGate = config.validation ? new ValidationGate(config.validation) : null;
   }
@@ -130,47 +147,115 @@ export class MissionOrchestrator {
       payload: { missionId: mission.id },
     });
 
-    try {
-      const graphSuccess = await this.executeDelegationGraph(plan.delegations);
+    // Global mission timeout
+    const maxMissionDuration = this.config.maxMissionDurationMs ?? DEFAULT_MAX_MISSION_DURATION_MS;
+    let missionTimeoutHandle: NodeJS.Timeout | null = null;
+    const missionTimeoutPromise = new Promise<Mission>((resolve) => {
+      missionTimeoutHandle = setTimeout(() => {
+        if (this.isRunning) {
+          this.isRunning = false;
 
-      if (!graphSuccess) {
-        // Phase 9: Check for stuck delegations before failing
-        const stuckIds = this.config.supervisor?.checkStuckDelegations() ?? [];
+          // Abort any in-flight delegation execution
+          if (this.currentAbortController) {
+            this.currentAbortController.abort();
+          }
+
+          this.publisher.publish({
+            missionId: mission.id,
+            type: "mission.timeout" as any,
+            payload: { missionId: mission.id, timeoutMs: maxMissionDuration },
+          });
+          this.config.missionState.completeMission("failed").then(() => {
+            this.currentMission = { ...this.currentMission!, status: "failed" };
+            resolve(this.currentMission!);
+          });
+        }
+      }, maxMissionDuration);
+    });
+
+    // Phase 9: Stuck detection interval
+    let stuckDetectionHandle: NodeJS.Timeout | null = null;
+    const stuckDetectionIntervalMs = this.config.maxDelegationDurationMs ?? 30000;
+    const runStuckDetection = async () => {
+      // Guard: only run if mission is still running and state is initialized
+      if (!this.isRunning || !this.config.supervisor || !this.currentMission) return;
+      try {
+        // Use monotonic time for stuck detection
+        const stuckIds = this.config.supervisor.checkStuckDelegations(performance.now());
         for (const stuckId of stuckIds) {
           const stuckDel = this.config.missionState.getDelegation(stuckId);
-          if (stuckDel) {
-            await this.config.supervisor?.handleStuckDelegation(stuckId, mission.id);
+          if (stuckDel && stuckDel.status === "running") {
+            const decision = await this.config.supervisor.handleStuckDelegation(stuckId, mission.id);
+            if (decision) {
+              // Execute the stuck recovery decision
+              const agentResult: AgentResult = {
+                delegationId: stuckId,
+                status: "failed",
+                output: "",
+                error: "Stuck delegation",
+                durationMs: 0,
+              };
+              await this.executeRecoveryDecision(stuckDel, agentResult, decision);
+            }
+          }
+        }
+      } catch {
+        // Ignore errors in stuck detection to avoid crashing the mission
+      }
+    };
+    stuckDetectionHandle = setInterval(runStuckDetection, stuckDetectionIntervalMs);
+
+    try {
+      const executionPromise = (async () => {
+        const graphSuccess = await this.executeDelegationGraph(plan.delegations);
+
+        if (!graphSuccess) {
+          // Phase 9: Check for stuck delegations before failing
+          const stuckIds = this.config.supervisor?.checkStuckDelegations(performance.now()) ?? [];
+          for (const stuckId of stuckIds) {
+            const stuckDel = this.config.missionState.getDelegation(stuckId);
+            if (stuckDel) {
+              await this.config.supervisor?.handleStuckDelegation(stuckId, mission.id);
+            }
+          }
+
+          await this.config.missionState.completeMission("failed");
+          this.currentMission = { ...this.currentMission!, status: "failed" };
+          return this.currentMission;
+        }
+
+        // Execute any dynamically added delegations
+        while (this.dynamicDelegations.length > 0 && this.isRunning) {
+          const batch = this.dynamicDelegations.splice(0);
+          for (const del of batch) {
+            if (!this.isRunning) break;
+            if (!this.canRunDelegation(del)) {
+              await this.config.missionState.completeDelegation(del.id, "blocked", undefined, "Dependencies not met");
+              continue;
+            }
+            await this.processSingleDelegation(del);
           }
         }
 
-        await this.config.missionState.completeMission("failed");
-        this.currentMission = { ...this.currentMission!, status: "failed" };
-        return this.currentMission;
-      }
-
-      // Execute any dynamically added delegations
-      while (this.dynamicDelegations.length > 0 && this.isRunning) {
-        const batch = this.dynamicDelegations.splice(0);
-        for (const del of batch) {
-          if (!this.isRunning) break;
-          if (!this.canRunDelegation(del)) {
-            await this.config.missionState.completeDelegation(del.id, "blocked", undefined, "Dependencies not met");
-            continue;
-          }
-          await this.processSingleDelegation(del);
+        if (!this.isRunning) {
+          await this.config.missionState.completeMission("failed");
+          this.currentMission = { ...this.currentMission!, status: "failed" };
+          return this.currentMission;
         }
-      }
 
-      if (!this.isRunning) {
-        await this.config.missionState.completeMission("failed");
-        this.currentMission = { ...this.currentMission!, status: "failed" };
+        await this.config.missionState.completeMission("completed");
+        this.currentMission = { ...this.currentMission!, status: "completed" };
         return this.currentMission;
-      }
+      })();
 
-      await this.config.missionState.completeMission("completed");
-      this.currentMission = { ...this.currentMission!, status: "completed" };
-      return this.currentMission;
+      return await Promise.race([executionPromise, missionTimeoutPromise]);
     } finally {
+      if (missionTimeoutHandle) {
+        clearTimeout(missionTimeoutHandle);
+      }
+      if (stuckDetectionHandle) {
+        clearInterval(stuckDetectionHandle);
+      }
       this.isRunning = false;
     }
   }
@@ -300,22 +385,23 @@ export class MissionOrchestrator {
       this.delegationStartTimes.set(delegation.id, Date.now());
     }
 
-    const agentResult = await this.executeDelegation(delegation);
+    // Track current execution for cancellation support
+    const executionPromise = this.executeDelegation(delegation);
+    this.currentExecution = executionPromise;
+
+    let agentResult: AgentResult;
+    try {
+      agentResult = await executionPromise;
+    } finally {
+      this.currentExecution = null;
+    }
 
     if (!this.isRunning) return agentResult;
 
-    // ── Phase 9: Stuck detection during execution ──
-    const startTime = this.delegationStartTimes.get(delegation.id) ?? 0;
-    const maxDuration = this.config.maxDelegationDurationMs ?? 30000;
-    if (Date.now() - startTime > maxDuration) {
-      // Delegation is stuck - notify supervisor
-      this.config.supervisor?.handleStuckDelegation(delegation.id, this.currentMission!.id);
-      this.delegationStartTimes.delete(delegation.id);
-      return { ...agentResult, status: "failed", error: "Delegation timed out (stuck)" };
-    }
-
     // Phase 8: track whether audit repair elevated a failed delegation to passed
     let auditRecovered = false;
+    // Track whether supervisor recovery (REPAIR/CHANGE_MODEL) succeeded
+    let supervisorRecovered = false;
 
     // ── Phase 9: Notify supervisor of delegation failure ──
     let supervisorDecision: SupervisorDecision | undefined;
@@ -326,7 +412,18 @@ export class MissionOrchestrator {
     // Execute recovery decision if supervisor provided one
     if (supervisorDecision && this.isRunning) {
       const recoverySuccess = await this.executeRecoveryDecision(delegation, agentResult, supervisorDecision);
-      if (recoverySuccess) return { ...agentResult, status: "passed" };
+      if (recoverySuccess) {
+        // For REPAIR and CHANGE_MODEL, the original delegation is updated in MissionState.
+        // Re-fetch the agentResult to get the recovered output.
+        // For REPLAN, the original delegation is NOT fixed; don't mark as recovered.
+        if (supervisorDecision.type === "REPAIR" || supervisorDecision.type === "CHANGE_MODEL") {
+          agentResult = await this.getAgentResult(delegation.id);
+          supervisorRecovered = true;
+        }
+        // For REPLAN: recoverySuccess means a new plan was created, but the original
+        // delegation remains failed. Let it proceed through gates (will fail) or be
+        // handled by the new dynamic delegations.
+      }
     }
 
     // Validation gate
@@ -396,11 +493,22 @@ export class MissionOrchestrator {
       if (!reviewed) {
         return { ...agentResult, status: "failed" };
       }
+      // Peer review passed (including any review-driven repairs).
+      // Re-audit the delegation to ensure the final artifact passes audit.
+      const reauditResult = await this.auditDelegation(delegation);
+      if (reauditResult.status === "FAIL") {
+        // Check if replanning should be attempted after re-audit failure
+        if (this.config.replanner && this.replanCount < (this.config.maxReplanAttempts ?? 2)) {
+          const replanned = await this.attemptReplan(delegation);
+          if (replanned) return { ...agentResult, status: "passed" };
+        }
+        return { ...agentResult, status: "failed" };
+      }
     }
 
-    // If audit repair recovered a failed agentResult, return passed.
-    // Otherwise preserve the original agentResult status.
-    if (auditRecovered) {
+    // If audit repair or supervisor recovery (REPAIR/CHANGE_MODEL) recovered a failed
+    // agentResult, return passed. Otherwise preserve the original agentResult status.
+    if (auditRecovered || supervisorRecovered) {
       return { ...agentResult, status: "passed" };
     }
 
@@ -453,13 +561,12 @@ export class MissionOrchestrator {
             mission: this.currentMission!,
           });
           let currentModel = route.primary;
-          let attemptedModels: string[] = [currentModel];
           for (let i = 0; i < (this.config.maxModelFallbackAttempts ?? 3); i++) {
             const nextModel = this.config.modelRouter!.nextFallback(route, currentModel);
             if (!nextModel) break;
-            attemptedModels.push(nextModel);
             currentModel = nextModel;
-            const result = await this.executeDelegation(delegation);
+            // Execute with the specific fallback model
+            const result = await this.executeDelegation(delegation, currentModel);
             if (result.status === "passed") return true;
           }
           return false;
@@ -483,10 +590,11 @@ export class MissionOrchestrator {
       }
 
       case "ABORT": {
-        // Abort the delegation - mark as failed and do not retry
+        // Abort the delegation - mark as failed and do not retry.
+        // Return false to indicate recovery was NOT successful; the delegation has failed.
         await this.config.missionState.completeDelegation(delegation.id, "failed",
           agentResult.output, agentResult.error);
-        return true;
+        return false;
       }
 
       default:
@@ -630,8 +738,28 @@ export class MissionOrchestrator {
     let lastReviewRequest: ReviewRequest | null = null;
     let attempt = 0;
 
+    // Helper to get current artifact paths from the artifact store
+    // Includes artifacts from the original delegation AND any repair delegations
+    const getCurrentArtifactPaths = (): string[] => {
+      if (!this.artifactStore) return [];
+      const artifacts = this.artifactStore.getArtifactsForDelegation(delegation.id);
+      // Also include artifacts from repair delegations (retryOf = original delegation ID)
+      const allArtifacts = this.artifactStore.getArtifactsForMission();
+      const repairArtifacts = allArtifacts.filter(a => a.delegationId !== delegation.id &&
+        // Check if this artifact's delegation is a repair of the original
+        // We can identify repairs by checking if there's a delegation with retryOf = delegation.id
+        // For simplicity, include all artifacts from delegations that depend on the original
+        allArtifacts.some(a2 => a2.delegationId === a.delegationId &&
+          this.config.missionState.getDelegation(a.delegationId)?.retryOf === delegation.id));
+      const combined = [...artifacts, ...repairArtifacts];
+      return combined.map(a => a.path).filter((p): p is string => Boolean(p));
+    };
+
     while (attempt < maxAttempts) {
       attempt++;
+
+      // Get current artifact paths for this review attempt (reflects any repairs)
+      const currentArtifactPaths = getCurrentArtifactPaths();
 
       const request: ReviewRequest | null = lastReviewRequest
         ? reviewSystem.createReviewRequest({
@@ -639,12 +767,14 @@ export class MissionOrchestrator {
             agentResult: { ...agentResult, status: "passed" as const },
             mission: this.currentMission,
             validationPassed: true,
+            currentArtifactPaths,
           })
         : reviewSystem.createReviewRequest({
             delegation,
             agentResult,
             mission: this.currentMission,
             validationPassed: true,
+            currentArtifactPaths,
           });
 
       if (!request) {
@@ -667,13 +797,21 @@ export class MissionOrchestrator {
 
       // Run the review using the configured review executor
       if (!executor) {
-        // No executor: default behavior is to approve
+        // No executor configured but review is required — this is a configuration error.
+        // Fail the review to prevent silent bypass of the quality gate.
         this.publisher.publish({
           missionId: delegation.missionId,
-          type: "delegation.review.passed" as any,
-          payload: { delegationId: delegation.id, skipped: true, attempt },
+          type: "delegation.review.failed" as any,
+          payload: {
+            delegationId: delegation.id,
+            reviewerRole: request.reviewerRole,
+            issues: [{ severity: "critical", description: "Peer review required but no review executor configured" }],
+            summary: "Review executor not configured",
+            attempt,
+            maxAttempts,
+          },
         });
-        return true;
+        return false;
       }
 
       const result = await reviewSystem.conductReview(request, executor);
@@ -1053,7 +1191,7 @@ export class MissionOrchestrator {
     };
   }
 
-  async executeDelegation(delegation: Delegation): Promise<AgentResult> {
+  async executeDelegation(delegation: Delegation, modelOverride?: string): Promise<AgentResult> {
     await this.config.missionState.startDelegation(delegation.id, "");
     this.publisher.publish({
       missionId: delegation.missionId,
@@ -1074,19 +1212,26 @@ export class MissionOrchestrator {
     const maxFallbackAttempts = this.config.maxModelFallbackAttempts ?? 3;
 
     // Phase 10: Select initial model from Mission ModelRouter
-    let selectedModel: string | undefined;
-    if (router) {
+    // If modelOverride is provided (e.g., from CHANGE_MODEL recovery), use it directly
+    let selectedModel: string | undefined = modelOverride;
+    if (!selectedModel && router) {
       const initialRoute = router.chooseModel({ delegation, role: delegation.role ?? "Developer", mission: this.currentMission! });
       selectedModel = initialRoute.primary;
     }
 
-    const executeOnce = async (modelOverride?: string): Promise<AgentResult> => {
+    // Create AbortController for this delegation execution
+    // This allows mission timeout to cancel in-flight execution
+    const abortController = new AbortController();
+    this.currentAbortController = abortController;
+
+    const executeOnce = async (overrideModel?: string): Promise<AgentResult> => {
       try {
         const adapterResult = await this.config.factoryAdapter.runDelegation(delegation, this.currentMission!, {
           baseDir: this.config.baseDir,
           project: this.config.project,
           fromStep: delegation.stepIds?.[0],
-          model: modelOverride ?? selectedModel,
+          model: overrideModel ?? selectedModel,
+          signal: abortController.signal,
         });
 
         const updatedDelegation = this.config.missionState.getDelegation(delegation.id);
@@ -1101,6 +1246,16 @@ export class MissionOrchestrator {
           readOnly: adapterResult.readOnly,
         };
       } catch (error) {
+        // If aborted, treat as failed with specific error
+        if (error instanceof Error && error.name === "AbortError") {
+          return {
+            delegationId: delegation.id,
+            status: "failed",
+            output: "",
+            error: "Execution aborted: mission timeout",
+            durationMs: Date.now() - startTime,
+          };
+        }
         return {
           delegationId: delegation.id,
           status: "failed",
@@ -1113,8 +1268,12 @@ export class MissionOrchestrator {
 
     agentResult = await executeOnce();
 
+    // Clear the abort controller after execution completes
+    this.currentAbortController = null;
+
     // If adapter threw (provider/model failure) and router is configured, retry with fallbacks
-    if (router && isModelProviderFailure(agentResult) && agentResult.status === "failed") {
+    // Only run internal fallback chain if no explicit modelOverride was provided
+    if (!modelOverride && router && isModelProviderFailure(agentResult) && agentResult.status === "failed") {
       const route = router.chooseModel({ delegation, role: delegation.role ?? "Developer", mission: this.currentMission! });
       let currentModel = route.primary;
       attemptedModels.push(currentModel);
@@ -1275,7 +1434,7 @@ export class MissionOrchestrator {
         delegation,
         repairPrompt,
         triage,
-        `triage-${triage.action}-${delegation.id}-${attempt}`,
+        `triage-${triage.action}-${delegation.id}-${attempt}-${randomUUID().slice(0, 6)}`,
       );
 
       await this.config.missionState.addDelegation(repairDelegation);
@@ -1339,13 +1498,48 @@ export class MissionOrchestrator {
       acceptanceCriteria: [...(original.acceptanceCriteria ?? []), "Validation passes"],
       status: "queued",
       createdAt: new Date().toISOString(),
+      retryOf: original.id,
     };
   }
 
   private async runVisualQa(buildDelegation: Delegation): Promise<void> {
     const adapter = this.config.visualQaAdapter;
+    const requiresVisualQa = this.currentMission?.context?.requiresVisualQa ?? false;
+
     if (!adapter) {
-      // No QA adapter available — record skip
+      if (requiresVisualQa) {
+        // Visual QA is required but no adapter available — fail the mission
+        const now = new Date().toISOString();
+        const failedResult: VisualQaResult = {
+          status: "failed",
+          passed: false,
+          checks: 0,
+          failedChecks: 0,
+          errors: ["Visual QA required but no adapter configured"],
+          artifacts: [],
+          startedAt: now,
+          finishedAt: now,
+        };
+        await this.config.missionState.recordVisualQaResult(failedResult);
+        this.publisher.publish({
+          missionId: buildDelegation.missionId,
+          type: MissionEventTypes.MISSION_VISUAL_QA_FAILED,
+          payload: {
+            reason: "Visual QA required but no adapter configured",
+            status: "failed",
+            passed: false,
+            totalChecks: 0,
+            passedChecks: 0,
+            failedChecks: 0,
+            errorCount: 1,
+            artifactCount: 0,
+          },
+        });
+        // Refresh current mission from state
+        this.currentMission = this.config.missionState.getMission();
+        return;
+      }
+      // No adapter and not required — record skip
       const now = new Date().toISOString();
       const skippedResult: VisualQaResult = {
         status: "skipped",
@@ -1451,12 +1645,27 @@ export class MissionOrchestrator {
   }
 
   async repairDelegation(delegation: Delegation, auditResult: AuditResult): Promise<boolean> {
-    const repairPlan = createRepairPlan(
-      delegation.id,
-      auditResult.recommendedRepair?.description ?? `Fix issues in ${delegation.title}`,
-      auditResult.recommendedRepair?.focusAreas ?? ["Unknown"],
-      this.config.maxRepairs
-    );
+    // Check if there's an existing repair plan in MissionState (e.g., after restart)
+    const existingRepairPlan = this.config.missionState.getRepairPlan(delegation.id);
+    let repairPlan: RepairPlan;
+    let startIteration: number;
+
+    if (existingRepairPlan && existingRepairPlan.iteration > 0) {
+      // Resume from persisted iteration
+      repairPlan = existingRepairPlan;
+      startIteration = repairPlan.iteration + 1;
+      // Ensure maxIterations matches config
+      repairPlan.maxIterations = this.config.maxRepairs;
+    } else {
+      // Fresh repair plan
+      repairPlan = createRepairPlan(
+        delegation.id,
+        auditResult.recommendedRepair?.description ?? `Fix issues in ${delegation.title}`,
+        auditResult.recommendedRepair?.focusAreas ?? ["Unknown"],
+        this.config.maxRepairs
+      );
+      startIteration = 1;
+    }
 
     await this.config.missionState.startRepair(delegation.id, repairPlan);
     this.publisher.publish({
@@ -1465,7 +1674,8 @@ export class MissionOrchestrator {
       payload: { delegationId: delegation.id, repairPlan },
     });
 
-    for (let iteration = 1; iteration <= this.config.maxRepairs; iteration++) {
+    // Use persisted iteration as source of truth
+    for (let iteration = startIteration; iteration <= this.config.maxRepairs; iteration++) {
       if (!this.isRunning) return false;
 
       await this.config.missionState.incrementRepairIteration(delegation.id);
@@ -1627,6 +1837,8 @@ export class MissionOrchestrator {
     }
   }
 
+  private currentExecution: Promise<AgentResult> | null = null;
+
   private canRunDelegation(delegation: Delegation): boolean {
     for (const depId of delegation.dependsOn) {
       const dep = this.config.missionState.getDelegation(depId);
@@ -1664,6 +1876,18 @@ export class MissionOrchestrator {
 
   stop(): void {
     this.isRunning = false;
+    // Wait for current execution to complete (with timeout) to allow graceful shutdown
+    if (this.currentExecution) {
+      const waitPromise = this.currentExecution;
+      // Don't await here to avoid blocking, but we could add a timeout
+      // For now, just let the execution complete naturally or timeout
+      Promise.race([
+        waitPromise,
+        new Promise(resolve => setTimeout(resolve, 30_000)) // 30s max wait
+      ]).catch(() => {
+        // Ignore errors during shutdown
+      });
+    }
   }
 
   getCurrentMission(): Mission | null {
@@ -1933,7 +2157,7 @@ export class DeterministicAuditor implements Auditor {
 }
 
 export class RealFactoryAdapter implements FactoryExecutionAdapter {
-  async runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string }): Promise<AgentResult> {
+  async runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }): Promise<AgentResult> {
     const goalResult = await runGoal(
       delegation.description,
       config.baseDir,
@@ -1946,6 +2170,7 @@ export class RealFactoryAdapter implements FactoryExecutionAdapter {
         template: mission.context?.template,
         workspace: mission.context?.workspace,
         model: config.model,
+        signal: config.signal,
       }
     );
     return {
@@ -1973,9 +2198,21 @@ export class ReadOnlyFactoryAdapter implements FactoryExecutionAdapter {
     this.config = config ?? {};
   }
 
-  async runDelegation(delegation: Delegation, _mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string }): Promise<AgentResult> {
+  async runDelegation(delegation: Delegation, _mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }): Promise<AgentResult> {
     const agent = this.config.agent ?? DEFAULT_READ_ONLY_AGENT;
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_READ_ONLY_TIMEOUT_MS;
+
+    // Reject immediately if already aborted
+    if (config.signal?.aborted) {
+      return {
+        delegationId: delegation.id,
+        status: "failed",
+        output: "",
+        error: "Execution aborted: mission timeout",
+        durationMs: 0,
+        readOnly: true,
+      };
+    }
 
     const prompt = `
 You are a read-only investigation agent.
@@ -2004,7 +2241,7 @@ IMPORTANT: This is a READ-ONLY mission. Do NOT modify anything.
     const startTime = Date.now();
 
     try {
-      const result = await this.runOpenCode(agent, prompt, config.project, timeoutMs, config.model);
+      const result = await this.runOpenCode(agent, prompt, config.project, timeoutMs, config.model, config.signal);
       const durationMs = Date.now() - startTime;
 
       if (result.timedOut) {
@@ -2053,10 +2290,22 @@ IMPORTANT: This is a READ-ONLY mission. Do NOT modify anything.
     prompt: string,
     project: string,
     timeoutMs: number,
-    model?: string
-  ): Promise<{ code: number; output: string; timedOut: boolean }> {
+    model?: string,
+    signal?: AbortSignal,
+  ): Promise<{ code: number; output: string; timedOut: boolean; truncated?: boolean }> {
+    // Reject immediately if already aborted
+    if (signal?.aborted) {
+      return Promise.resolve({
+        code: -1,
+        output: "",
+        timedOut: false,
+        truncated: false,
+      });
+    }
+
     return new Promise((resolve) => {
       let output = "";
+      let truncated = false;
       let settled = false;
 
       const args = ["run", "--agent", agent];
@@ -2082,28 +2331,77 @@ IMPORTANT: This is a READ-ONLY mission. Do NOT modify anything.
       );
 
       child.onData((data: string) => {
+        if (output.length + data.length > MAX_OUTPUT_CHARS) {
+          if (!truncated) {
+            output += "\n[Output truncated: exceeded " + MAX_OUTPUT_CHARS + " characters]";
+            truncated = true;
+          }
+          // Stop accumulating but let process continue
+          return;
+        }
         output += data;
       });
+
+      // Helper: kill process group or single process
+      const killProcess = () => {
+        const pid = child.pid;
+        if (pid && pid > 0) {
+          try {
+            process.kill(-pid, "SIGTERM");
+          } catch {
+            // Process group may already be gone
+          }
+        } else {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // Process may already be gone
+          }
+        }
+        setTimeout(() => {
+          if (pid && pid > 0) {
+            try {
+              process.kill(-pid, "SIGKILL");
+            } catch {
+              // Process group may already be gone
+            }
+          } else {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // Process may already be gone
+            }
+          }
+        }, 5_000);
+      };
+
+      // Abort signal: terminate the PTY process
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        killProcess();
+        resolve({
+          code: -1,
+          output: output + "\n[Terminated: aborted]",
+          timedOut: false,
+          truncated,
+        });
+      };
+      if (signal) {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
 
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Process may already be gone
-        }
-        setTimeout(() => {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Process may already be gone
-          }
-        }, 5_000);
+        if (signal) signal.removeEventListener("abort", onAbort);
+        killProcess();
         resolve({
           code: -1,
           output: output + "\n[Terminated: timeout exceeded]",
           timedOut: true,
+          truncated,
         });
       }, timeoutMs);
 
@@ -2111,10 +2409,12 @@ IMPORTANT: This is a READ-ONLY mission. Do NOT modify anything.
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (signal) signal.removeEventListener("abort", onAbort);
         resolve({
           code: exitCode ?? 1,
           output,
           timedOut: false,
+          truncated,
         });
       });
     });

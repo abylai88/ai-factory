@@ -417,7 +417,7 @@ describe("QA events emitted", () => {
     expect(eventTypes).not.toContain(MissionEventTypes.MISSION_VISUAL_QA_SKIPPED);
   });
 
-  it("emits visual_qa.skipped when no adapter configured", async () => {
+  it("emits visual_qa.failed when required but no adapter configured", async () => {
     const projectDir = path.join(tmpDir, "projects", "traffic-dodge");
     await fs.mkdir(projectDir, { recursive: true });
     await fs.writeFile(
@@ -441,7 +441,7 @@ describe("QA events emitted", () => {
     const auditor = new CodingMissionAuditor();
     const eventSink = new InMemoryEventSink();
 
-    // No visualQaAdapter
+    // No visualQaAdapter - but mission requires Visual QA (package-name-fix pattern)
     const orchestrator = new MissionOrchestrator({
       maxRepairs: 3,
       baseDir: tmpDir,
@@ -456,7 +456,8 @@ describe("QA events emitted", () => {
 
     const events = eventSink.recent();
     const eventTypes = events.map((e) => e.type);
-    expect(eventTypes).toContain(MissionEventTypes.MISSION_VISUAL_QA_SKIPPED);
+    // AUDIT-020: required Visual QA + missing adapter = blocking failure
+    expect(eventTypes).toContain(MissionEventTypes.MISSION_VISUAL_QA_FAILED);
   });
 
   it("emits visual_qa.failed on QA failure", async () => {

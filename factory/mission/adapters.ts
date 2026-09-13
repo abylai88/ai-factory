@@ -72,6 +72,27 @@ function isProtectedRelativePath(filePath: string): boolean {
   return false;
 }
 
+// Check if any component of the path is a symlink that escapes the project root
+async function hasSymlinkEscape(filePath: string, projectPath: string): Promise<boolean> {
+  const resolved = path.resolve(projectPath, filePath);
+  const parts = resolved.split(path.sep);
+  const projectParts = projectPath.split(path.sep);
+
+  for (let i = projectParts.length; i <= parts.length; i++) {
+    const checkPath = parts.slice(0, i).join(path.sep);
+    try {
+      const stat = await fs.lstat(checkPath);
+      if (stat.isSymbolicLink()) {
+        return true;
+      }
+    } catch {
+      break;
+    }
+  }
+
+  return false;
+}
+
 function validateProjectRoot(projectRoot: string): { valid: boolean; reason?: string } {
   const resolved = path.resolve(projectRoot);
 
@@ -105,10 +126,21 @@ export class ControlledCodingAdapter implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string; model?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }
   ): Promise<AgentResult> {
     const startTime = Date.now();
     const metadata = extractMetadata(delegation);
+
+    // Reject immediately if already aborted
+    if (config.signal?.aborted) {
+      return {
+        delegationId: delegation.id,
+        status: "failed",
+        output: "",
+        error: "Execution aborted: mission timeout",
+        durationMs: 0,
+      };
+    }
 
     if (!metadata.codingOperation) {
       return {
@@ -140,6 +172,18 @@ export class ControlledCodingAdapter implements FactoryExecutionAdapter {
         status: "failed",
         output: "",
         error: fileCheck.reason,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    // Check for symlink escape
+    const symlinkCheck = await hasSymlinkEscape(op.file, projectRoot);
+    if (symlinkCheck) {
+      return {
+        delegationId: delegation.id,
+        status: "failed",
+        output: "",
+        error: `Symlink escape detected in path: ${op.file}`,
         durationMs: Date.now() - startTime,
       };
     }
@@ -230,10 +274,21 @@ export class ControlledBuildAdapter implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string; model?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }
   ): Promise<AgentResult> {
     const startTime = Date.now();
     const metadata = extractMetadata(delegation);
+
+    // Reject immediately if already aborted
+    if (config.signal?.aborted) {
+      return {
+        delegationId: delegation.id,
+        status: "failed",
+        output: "",
+        error: "Execution aborted: mission timeout",
+        durationMs: 0,
+      };
+    }
 
     if (!metadata.buildCommand) {
       return {
@@ -258,7 +313,7 @@ export class ControlledBuildAdapter implements FactoryExecutionAdapter {
     }
 
     try {
-      const buildResult = await this.executeBuild(metadata.buildCommand, projectRoot);
+      const buildResult = await this.executeBuild(metadata.buildCommand, projectRoot, config.signal);
 
       const output = JSON.stringify(buildResult);
 
@@ -289,27 +344,70 @@ export class ControlledBuildAdapter implements FactoryExecutionAdapter {
     }
   }
 
-  private async executeBuild(command: string, cwd: string): Promise<BuildResult> {
+  private async executeBuild(command: string, cwd: string, signal?: AbortSignal): Promise<BuildResult> {
     const startTime = Date.now();
+
+    // Reject immediately if already aborted
+    if (signal?.aborted) {
+      return {
+        command,
+        status: "failure",
+        exitCode: -1,
+        stdout: "",
+        stderr: "Build aborted: mission timeout",
+        durationMs: 0,
+      };
+    }
 
     try {
       const parts = command.split(/\s+/);
       const cmd = parts[0];
       const args = parts.slice(1);
 
-      const result = await execFileAsync(cmd, args, {
-        cwd,
-        timeout: 120_000,
-        maxBuffer: 1024 * 1024,
-        encoding: "utf8",
+      // Use raw execFile to get child process handle for abort cancellation
+      const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+        const child = execFile(cmd, args, {
+          cwd,
+          timeout: 120_000,
+          maxBuffer: 1024 * 1024,
+          encoding: "utf8",
+        }, (error, stdout, stderr) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve({ stdout: stdout ?? "", stderr: stderr ?? "" });
+          }
+        });
+
+        // Abort signal: kill the build process
+        if (signal) {
+          const onAbort = () => {
+            try {
+              child.kill("SIGTERM");
+            } catch {
+              // Process may already be gone
+            }
+            setTimeout(() => {
+              try {
+                child.kill("SIGKILL");
+              } catch {
+                // Process may already be gone
+              }
+            }, 5_000);
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+          child.on("close", () => {
+            signal.removeEventListener("abort", onAbort);
+          });
+        }
       });
 
       return {
         command,
         status: "success",
         exitCode: 0,
-        stdout: result.stdout?.slice(0, 2000) ?? "",
-        stderr: result.stderr?.slice(0, 2000) ?? "",
+        stdout: result.stdout.slice(0, 2000),
+        stderr: result.stderr.slice(0, 2000),
         durationMs: Date.now() - startTime,
       };
     } catch (error: unknown) {
@@ -335,7 +433,7 @@ export class CompositeCodingBuildAdapter implements FactoryExecutionAdapter {
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
-    config: { baseDir: string; project: string; fromStep?: string; model?: string }
+    config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }
   ): Promise<AgentResult> {
     const metadata = extractMetadata(delegation);
 

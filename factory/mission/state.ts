@@ -69,6 +69,9 @@ export class MissionState {
   private readonly missionId: string;
   private readonly jsonlPath: string;
   private readonly snapshotPath: string;
+  private readonly lockPath: string;
+  private readonly disableLock: boolean;
+  private lockFd: fs.FileHandle | null = null;
 
   private mission: Mission;
   private plan: ExecutionPlan | null = null;
@@ -93,12 +96,14 @@ export class MissionState {
     reason: string;
   }> = [];
 
-  constructor(baseDir: string, missionId: string) {
+  constructor(baseDir: string, missionId: string, options?: { disableLock?: boolean }) {
     const sanitized = sanitizeMissionId(missionId);
     this.missionsDir = path.join(baseDir, "outputs", "missions");
     this.missionId = sanitized;
     this.jsonlPath = path.join(this.missionsDir, `${sanitized}.jsonl`);
     this.snapshotPath = path.join(this.missionsDir, `${sanitized}.state.json`);
+    this.lockPath = path.join(this.missionsDir, `${sanitized}.lock`);
+    this.disableLock = options?.disableLock ?? (process.env.MISSION_DISABLE_LOCK === "true");
 
     this.mission = {
       id: sanitized,
@@ -114,10 +119,66 @@ export class MissionState {
   async init(): Promise<void> {
     await fs.mkdir(this.missionsDir, { recursive: true });
 
+    if (!this.disableLock) {
+      // Acquire exclusive lock to prevent concurrent mission execution
+      await this._acquireLock();
+    }
+
+    let snapshotLoaded = false;
+    let snapshotTime: string | null = null;
+
     try {
       await this.loadFromSnapshot();
+      snapshotLoaded = true;
+      snapshotTime = this.mission.updatedAt;
     } catch {
-      await this.loadFromJsonl();
+      // No valid snapshot, will do full JSONL replay
+    }
+
+    // Always replay JSONL events after snapshot time (if snapshot loaded) or from start
+    await this.loadFromJsonl(snapshotLoaded ? snapshotTime : null);
+  }
+
+  private async _acquireLock(): Promise<void> {
+    // Use O_EXCL flag to create lock file exclusively
+    // This prevents concurrent processes from running the same mission
+    try {
+      this.lockFd = await fs.open(this.lockPath, "wx");
+      // Write PID to lock file for debugging
+      await this.lockFd.write(`${process.pid}\n`);
+    } catch (err: unknown) {
+      const nodeErr = err as NodeJS.ErrnoException;
+      if (nodeErr.code === "EEXIST") {
+        // Lock file exists - another process owns this mission
+        const existingPid = await fs.readFile(this.lockPath, "utf8").catch(() => "unknown");
+        throw new Error(`Mission ${this.missionId} is already running (PID: ${existingPid.trim()}). Cannot start concurrent execution.`);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Release the mission lock. Call this when the mission is no longer needed
+   * to allow other processes to acquire the lock.
+   */
+  async releaseLock(): Promise<void> {
+    await this._releaseLock();
+  }
+
+  private async _releaseLock(): Promise<void> {
+    if (this.disableLock) return;
+    if (this.lockFd !== null) {
+      try {
+        await this.lockFd.close();
+      } catch {
+        // Ignore close errors
+      }
+      this.lockFd = null;
+      try {
+        await fs.unlink(this.lockPath);
+      } catch {
+        // Ignore unlink errors
+      }
     }
   }
 
@@ -136,7 +197,7 @@ export class MissionState {
     this.repairCycleCount = validated.repairCycleCount ?? 0;
   }
 
-  private async loadFromJsonl(): Promise<void> {
+  private async loadFromJsonl(afterTime: string | null = null): Promise<void> {
     let content: string;
     try {
       content = await fs.readFile(this.jsonlPath, "utf8");
@@ -148,6 +209,10 @@ export class MissionState {
     for (const line of lines) {
       try {
         const event = JSON.parse(line);
+        // Skip events that occurred before or at the snapshot time
+        if (afterTime && event.occurredAt && event.occurredAt <= afterTime) {
+          continue;
+        }
         this.applyEvent(event);
       } catch {
         continue;
@@ -268,7 +333,8 @@ export class MissionState {
             actionsFailed: payload.actionsFailed,
           };
         }
-        case "mission.repair.failed":
+        break;
+      case "mission.repair.failed":
         this.mission.status = "repairing";
         this.repairCycleCount = (payload.cycle as number) ?? this.repairCycleCount;
         this.mission.repairCycleCount = this.repairCycleCount;
@@ -403,6 +469,11 @@ export class MissionState {
   }
 
   async addDelegation(delegation: Delegation): Promise<void> {
+    // Prevent duplicate delegation IDs
+    const existing = this.delegations.find(d => d.id === delegation.id);
+    if (existing) {
+      throw new Error(`Delegation with ID ${delegation.id} already exists`);
+    }
     await this.appendEvent({ missionId: this.missionId, type: "delegation.created", payload: delegation });
   }
 
@@ -449,6 +520,7 @@ export class MissionState {
   async completeMission(status: "completed" | "failed"): Promise<void> {
     this.mission.status = status;
     await this.appendEvent({ missionId: this.missionId, type: status === "completed" ? "mission.completed" : "mission.failed", payload: {} });
+    await this._releaseLock();
   }
 
   async approveMission(): Promise<void> {

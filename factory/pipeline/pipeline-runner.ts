@@ -27,7 +27,7 @@ export interface GoalResult {
  * injected to exercise orchestration logic without invoking real agents.
  */
 export interface StepExecutor {
-  execute(task: Task, contextText: string, project: string): Promise<Task>;
+  execute(task: Task, contextText: string, project: string, signal?: AbortSignal): Promise<Task>;
 }
 
 export interface PipelineRunnerConfig {
@@ -41,6 +41,7 @@ export interface PipelineRunnerConfig {
   workspace?: string;
   fromStep?: string;
   model?: string;
+  signal?: AbortSignal;
 }
 
 function isTestStep(step: PipelineStep): boolean {
@@ -96,9 +97,10 @@ export class RealExecutor implements StepExecutor {
   async execute(
     task: Task,
     _contextText: string,
-    _project: string
+    _project: string,
+    signal?: AbortSignal,
   ): Promise<Task> {
-    return this.runner.executeTask(task);
+    return this.runner.executeTask(task, signal);
   }
 
   createTask(
@@ -119,6 +121,7 @@ export class PipelineRunner {
   private readonly maxFixIterations: number;
   private readonly fromStep?: string;
   private readonly model?: string;
+  private readonly signal?: AbortSignal;
   private readonly setup: {
     engine?: string;
     stack?: string;
@@ -132,6 +135,7 @@ export class PipelineRunner {
     this.maxFixIterations = config.maxFixIterations ?? MAX_FIX_ITERATIONS;
     this.fromStep = config.fromStep;
     this.model = config.model;
+    this.signal = config.signal;
     this.executor =
       config.executor ?? new RealExecutor(config.baseDir, config.project);
     this.setup = {
@@ -255,7 +259,8 @@ IMPORTANT:
       const fixResult = await this.executor.execute(
         fixTask,
         testContext,
-        this.project
+        this.project,
+        this.signal,
       );
 
       await context.recordBugfixIteration();
@@ -287,7 +292,8 @@ IMPORTANT:
       const retestResult = await this.executor.execute(
         retest,
         testContext,
-        this.project
+        this.project,
+        this.signal,
       );
 
       // Same output-based failure detection for retest steps
@@ -453,7 +459,8 @@ IMPORTANT:
       const result = await this.executor.execute(
         stepTask,
         contextText,
-        this.project
+        this.project,
+        this.signal,
       );
 
       lastStepOutput = (result.result ?? result.error ?? "").slice(0, 4000);
@@ -569,6 +576,7 @@ export async function runGoal(
     pipelineType?: PipelineType;
     fromStep?: string;
     model?: string;
+    signal?: AbortSignal;
   }
 ): Promise<GoalResult> {
   const pipelineId = randomUUID().slice(0, 8);
@@ -587,6 +595,7 @@ export async function runGoal(
     workspace: opts?.workspace,
     fromStep: opts?.fromStep,
     model: opts?.model,
+    signal: opts?.signal,
   });
 
   await runner.init();

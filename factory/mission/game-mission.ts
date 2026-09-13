@@ -23,7 +23,7 @@ import { OpenCodePlannerModel } from "./opencode-planner-model.js";
 import { MissionPlanner, createMissionPlanner } from "./mission-planner.js";
 import { createModelRouter } from "./model-router.js";
 import { createMissionSupervisor } from "./mission-supervisor.js";
-import { PeerReviewSystem, defaultReviewExecutor } from "./peer-review.js";
+import { PeerReviewSystem } from "./peer-review.js";
 
 export interface GameMissionInput {
   goal: string;
@@ -164,8 +164,7 @@ export async function executeGameMission(
   //    which dispatches to the appropriate agent based on pipeline type.
   const eventSink = new InMemoryEventSink();
   const publisher = createMissionEventPublisher(eventSink);
-
-  // Phase 10: Wire Phase 8-9 systems
+// Phase 10: Wire Phase 8-9 systems
   const modelRouter = createModelRouter();
 
   const supervisor = createMissionSupervisor({
@@ -176,7 +175,10 @@ export async function executeGameMission(
     replanner: planner,
   });
 
-  const peerReview = new PeerReviewSystem();
+  // Peer review is not enabled in production until a real ReviewExecutor is implemented.
+  // The defaultReviewExecutor was a stub that always failed; peer review requires
+  // an explicit production executor to be provided.
+  const peerReview = undefined;
 
   const validation = {
     buildCommand: "npm run build",
@@ -197,6 +199,7 @@ export async function executeGameMission(
   try {
   if (workflowMode === "coding") {
     const auditor = new CodingMissionAuditor();
+
     const orchestrator = new MissionOrchestrator({
       maxRepairs: constraints.maxRepairs,
       baseDir,
@@ -206,8 +209,7 @@ export async function executeGameMission(
       eventSink,
       missionState: state,
       modelRouter,
-      peerReview,
-      reviewExecutor: defaultReviewExecutor,
+      // peerReview: undefined (not enabled without real executor)
       validation,
       supervisor,
       replanner: planner,
@@ -254,8 +256,7 @@ export async function executeGameMission(
     visualQaAdapter,
     repairExecutor,
     modelRouter,
-    peerReview,
-    reviewExecutor: defaultReviewExecutor,
+    // peerReview: undefined (not enabled without real executor)
     validation,
     supervisor,
     replanner: planner,

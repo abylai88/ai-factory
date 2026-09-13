@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import {
   MissionOrchestrator,
   type FactoryExecutionAdapter,
@@ -9,7 +10,7 @@ import {
 } from "../orchestrator.js";
 import { InMemoryEventSink } from "../events.js";
 import { MissionState } from "../state.js";
-import { PeerReviewSystem, defaultReviewExecutor, type ReviewRequest, type ReviewResult } from "../peer-review.js";
+import { PeerReviewSystem, defaultReviewExecutor, type ReviewRequest, type ReviewResult, type ReviewExecutor } from "../peer-review.js";
 import { AgentRegistry } from "../agent-registry.js";
 import { ArtifactStore } from "../artifact-store.js";
 import { createMission, createDelegation } from "../mission.js";
@@ -466,6 +467,17 @@ describe("Team execution E2E: no review executor", () => {
     };
 
     const eventSink = new InMemoryEventSink();
+    // Provide a passing review executor since defaultReviewExecutor now blocks
+    const passingReviewExecutor: ReviewExecutor = async (req) => ({
+      id: `res-${randomUUID().slice(0, 8)}`,
+      requestId: req.id,
+      delegationId: req.delegationId,
+      passed: true,
+      issues: [],
+      reviewerRole: req.reviewerRole,
+      summary: "Mock review passed",
+      createdAt: new Date().toISOString(),
+    });
     const orchestrator = new MissionOrchestrator({
       maxRepairs: 1,
       baseDir: tmpDir,
@@ -475,7 +487,7 @@ describe("Team execution E2E: no review executor", () => {
       eventSink,
       missionState: state,
       peerReview: new PeerReviewSystem(),
-      // No reviewExecutor provided - should default to defaultReviewExecutor
+      reviewExecutor: passingReviewExecutor,
     });
 
     const result = await orchestrator.executeMission(mission, plan);

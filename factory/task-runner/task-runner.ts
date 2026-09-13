@@ -37,6 +37,8 @@ export const ROLE_TIMEOUTS_MS: Record<string, number> = {
 };
 
 const GRACEFUL_SHUTDOWN_MS = 5_000;
+// Cap output at 10MB to prevent memory exhaustion from runaway agent output
+const MAX_OUTPUT_CHARS = 10_000_000;
 
 export class TaskRunner {
   private readonly manager: TaskManager;
@@ -76,10 +78,22 @@ export class TaskRunner {
     taskAgent: string,
     prompt: string,
     project: string,
-    timeoutMs: number
-  ): Promise<{ code: number; output: string; timedOut: boolean }> {
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ code: number; output: string; timedOut: boolean; truncated?: boolean }> {
+    // Reject immediately if already aborted
+    if (signal?.aborted) {
+      return Promise.resolve({
+        code: -1,
+        output: "",
+        timedOut: false,
+        truncated: false,
+      });
+    }
+
     return new Promise((resolve) => {
       let output = "";
+      let truncated = false;
       let settled = false;
 
       console.log("\n========================================");
@@ -112,36 +126,81 @@ export class TaskRunner {
         }
       );
 
+      // Helper: kill process group or single process
+      const killProcess = () => {
+        const pid = child.pid;
+        if (pid && pid > 0) {
+          try {
+            process.kill(-pid, "SIGTERM");
+          } catch {
+            // Process group may already be gone
+          }
+        } else {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // Process may already be gone
+          }
+        }
+        setTimeout(() => {
+          if (pid && pid > 0) {
+            try {
+              process.kill(-pid, "SIGKILL");
+            } catch {
+              // Process group may already be gone
+            }
+          } else {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // Process may already be gone
+            }
+          }
+        }, GRACEFUL_SHUTDOWN_MS);
+      };
+
       child.onData((data: string) => {
+        if (output.length + data.length > MAX_OUTPUT_CHARS) {
+          if (!truncated) {
+            output += "\n[Output truncated: exceeded " + MAX_OUTPUT_CHARS + " characters]";
+            truncated = true;
+          }
+          // Stop accumulating but let process continue
+          return;
+        }
         output += data;
         process.stdout.write(data);
       });
 
+      // Abort signal: terminate the PTY process
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        console.log("\n[ABORT] Mission abort signal received. Terminating agent...");
+        killProcess();
+        resolve({
+          code: -1,
+          output: output + "\n[Terminated: aborted]",
+          timedOut: false,
+          truncated,
+        });
+      };
+      if (signal) {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
+        if (signal) signal.removeEventListener("abort", onAbort);
         console.log(`\n[TIMEOUT] Agent exceeded ${timeoutMs}ms. Sending SIGTERM...`);
-
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Process may already be gone
-        }
-
-        setTimeout(() => {
-          if (!settled) return;
-          // If still alive after grace period, SIGKILL
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Process may already be gone
-          }
-        }, GRACEFUL_SHUTDOWN_MS);
-
+        killProcess();
         resolve({
           code: -1,
           output: output + "\n[Terminated: attempt timeout exceeded]",
-          timedOut: true
+          timedOut: true,
+          truncated
         });
       }, timeoutMs);
 
@@ -149,10 +208,12 @@ export class TaskRunner {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (signal) signal.removeEventListener("abort", onAbort);
         resolve({
           code: exitCode ?? 1,
           output,
-          timedOut: false
+          timedOut: false,
+          truncated
         });
       });
     });
@@ -226,7 +287,7 @@ export class TaskRunner {
     };
   }
 
-  async executeTask(task: Task): Promise<Task> {
+  async executeTask(task: Task, signal?: AbortSignal): Promise<Task> {
     const project = this.project;
 
     console.log("\n╔══════════════════════════════════════╗");
@@ -292,7 +353,8 @@ RULES:
         taskAgent,
         prompt,
         project,
-        timeoutMs
+        timeoutMs,
+        signal,
       );
 
       const attemptResult = this.classifyAttempt(result, choice.model, attempt, timeoutMs);

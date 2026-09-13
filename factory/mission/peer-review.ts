@@ -81,6 +81,9 @@ export class PeerReviewSystem {
     mission: Mission;
     validationPassed?: boolean;
     validationError?: string;
+    // Optional: current artifact paths from the filesystem/artifact store
+    // If provided, these take precedence over delegation.outputs (which are plan-time)
+    currentArtifactPaths?: string[];
   }): ReviewRequest | null {
     const originalRole = input.delegation.role;
     if (!originalRole) {
@@ -95,8 +98,9 @@ export class PeerReviewSystem {
       return null;
     }
 
-    const artifactPaths = (input.delegation.outputs ?? [])
-      .map((o) => o.path)
+    // Use current artifact paths if provided (post-repair), otherwise fall back to plan-time outputs
+    const artifactPaths = (input.currentArtifactPaths ?? input.delegation.outputs ?? [])
+      .map((o) => typeof o === "string" ? o : o.path)
       .filter((p): p is string => Boolean(p));
 
     return {
@@ -244,16 +248,17 @@ export type ReviewExecutor = (request: ReviewRequest) => Promise<ReviewResult>;
 // ── Default Review Executor (stub) ─────────────────────────────
 
 /**
- * Default no-op review executor that always passes.
- * Used as a fallback when no review executor is configured.
+ * Default review executor that blocks by default.
+ * Forces explicit configuration of a real reviewer in production.
+ * Tests should provide a mock executor that returns passed: true.
  */
 export const defaultReviewExecutor: ReviewExecutor = async (request: ReviewRequest) => ({
   id: `res-${randomUUID().slice(0, 8)}`,
   requestId: request.id,
   delegationId: request.delegationId,
-  passed: true,
-  issues: [],
+  passed: false,
+  issues: [{ severity: "critical", description: "Peer review requires a configured review executor. Provide a real executor in production." }],
   reviewerRole: request.reviewerRole,
-  summary: "Default executor: review skipped (no executor configured).",
+  summary: "Default executor: review blocked (no real executor configured).",
   createdAt: new Date().toISOString(),
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { PeerReviewSystem, defaultReviewExecutor } from "../peer-review.js";
+import { PeerReviewSystem, defaultReviewExecutor, type ReviewExecutor } from "../peer-review.js";
 import type { Delegation, Mission, AgentResult } from "../mission.js";
 import { createMission, createDelegation } from "../mission.js";
 import { AgentRegistry } from "../agent-registry.js";
@@ -106,7 +106,17 @@ describe("PeerReviewSystem", () => {
         agentResult: passingResult("d1"),
         mission,
       });
-      const result = await sys.conductReview(req!, defaultReviewExecutor);
+      const passingExecutor: ReviewExecutor = async () => ({
+        id: "res-mock",
+        requestId: req!.id,
+        delegationId: del.id,
+        passed: true,
+        issues: [],
+        reviewerRole: req!.reviewerRole,
+        summary: "Mock review passed",
+        createdAt: new Date().toISOString(),
+      });
+      const result = await sys.conductReview(req!, passingExecutor);
       expect(result.passed).toBe(true);
       expect(sys.getReview(result.id)).toBeDefined();
     });

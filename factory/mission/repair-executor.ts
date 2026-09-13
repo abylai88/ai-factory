@@ -440,6 +440,12 @@ export class DeterministicRepairExecutor implements RepairExecutor {
     // If any action failed, rollback all changes
     if (rollbackNeeded) {
       for (const [file, originalContent] of Object.entries(fileContents)) {
+        // Re-verify symlink safety at rollback time (TOCTOU protection)
+        const symlinkCheck = await hasSymlinkEscape(file, projectPath);
+        if (symlinkCheck) {
+          // Log but don't write - would escape project
+          continue;
+        }
         const fullPath = path.resolve(projectPath, file);
         try {
           await fs.writeFile(fullPath, originalContent, "utf8");

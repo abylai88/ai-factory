@@ -45,7 +45,8 @@ export class DryRunExecutor implements StepExecutor {
   async execute(
     task: Task,
     _contextText: string,
-    _project: string
+    _project: string,
+    _signal?: AbortSignal,
   ): Promise<Task> {
     const role = task.role;
     this.executions.push(`${task.title} :: ${role}`);
