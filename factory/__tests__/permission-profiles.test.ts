@@ -43,8 +43,8 @@ function evaluateBashCommand(
 // ─── Profile Completeness ─────────────────────────────────────────
 
 describe("permission profiles", () => {
-  it("has profiles for all 14 agent roles", () => {
-    expect(AGENT_NAMES.length).toBe(14);
+  it("has profiles for all 17 agent roles", () => {
+    expect(AGENT_NAMES.length).toBe(17);
   });
 
   it("each profile has valid edit/todowrite", () => {
@@ -254,6 +254,26 @@ describe("role-specific permissions", () => {
     expect(builderYaml).toContain('"npm install*": ask');
     const programmerYaml = buildPermissionYaml(PROFILES.programmer);
     expect(programmerYaml).toContain('"npm install*": ask');
+  });
+
+  it("tool-layer roles exist and cannot edit files directly", () => {
+    expect(PROFILES.visual.edit).toBe("deny");
+    expect(PROFILES.ui.edit).toBe("deny");
+    expect(PROFILES.qa.edit).toBe("deny");
+  });
+
+  it("qa mirrors tester build permissions", () => {
+    const yaml = buildPermissionYaml(PROFILES.qa);
+    expect(yaml).toContain('"npm test*": allow');
+    expect(yaml).toContain('"rojo *": allow');
+  });
+
+  it("visual/ui/qa carry roblox tool permissions", () => {
+    for (const name of ["visual", "ui", "qa"] as const) {
+      const yaml = buildPermissionYaml(PROFILES[name]);
+      expect(yaml).toContain('"rojo *": allow');
+      expect(yaml).toContain('"stylua *": allow');
+    }
   });
 });
 

@@ -28,8 +28,10 @@ import { MissionPlanner, createMissionPlanner } from "./mission-planner.js";
 import { createModelRouter } from "./model-router.js";
 import { createMissionSupervisor } from "./mission-supervisor.js";
 import { PeerReviewSystem } from "./peer-review.js";
+import { deriveBlueprintFromGoal } from "./blueprint.js";
+import { acquireLock, studioLockName, type LockHandle } from "./resource-control.js";
 
-const ALLOWED_TEMPLATES = ["phaser-generic-web-template", "yagames-phaser-template"] as const;
+const ALLOWED_TEMPLATES = ["phaser-generic-web-template", "yagames-phaser-template", "roblox-rojo-template"] as const;
 
 function parseArgs(argv: string[]): {
   command: string;
@@ -126,7 +128,7 @@ Options:
   --project-id <id>     Use existing project by ID (must be in projects/)
   --template <id>       Template to use for new project (default: auto)
   --list-templates      List available allowlisted templates
-  --engine <name>       Engine: web | unity (default: auto-classified)
+  --engine <name>       Engine: web | roblox (default: auto-classified)
   --max-repairs <N>     Max repair iterations per delegation (default: 3)
   --dry-run             Show mission plan, do NOT execute
   --read-only           Execute read-only investigation (no file modifications)
@@ -139,6 +141,7 @@ Resume Options:
 
 Examples:
   npm run mission -- run "Build a platformer game"
+  npm run mission -- run "Create a Roblox simulator with coins and upgrades" --engine roblox
   npm run mission -- run "Fix TypeScript errors" --dry-run
   npm run mission -- run "Add new level" --project-id traffic-dodge
   npm run mission -- run "Inspect project architecture" --read-only --project-id traffic-dodge
@@ -163,10 +166,11 @@ async function setupWorkspace(
   const goalEngine = explicitEngine ?? classifyGoal(goal);
 
   if (goalEngine.kind === "unity") {
-    throw new Error("Unity not supported. Use --engine web for Phaser/TypeScript projects.");
+    throw new Error("Unity not supported. Use --engine web for Phaser/TypeScript projects or --engine roblox for Roblox/Luau projects.");
   }
 
-  if (goalEngine.kind !== "web" || !goalEngine.supported) {
+  // Web and Roblox are both first-class platforms. Anything else is rejected.
+  if ((goalEngine.kind !== "web" && goalEngine.kind !== "roblox") || !goalEngine.supported) {
     throw new Error(`Unsupported engine: ${goalEngine.reason}`);
   }
 
@@ -174,7 +178,7 @@ async function setupWorkspace(
   const template = await setup.templateFor(goalEngine, goal);
 
   if (!template) {
-    throw new Error("No embedded template found for WEB projects.");
+    throw new Error(`No embedded template found for ${goalEngine.kind.toUpperCase()} projects.`);
   }
 
   let workspaceDir: string;
@@ -287,6 +291,7 @@ async function main(): Promise<void> {
       failedChecks,
       artifactMetadata: visualQa.artifacts.map((a) => ({ id: a.id, type: a.type, label: a.label })),
       affectedFiles,
+      engine: mission.context?.engine,
     };
 
     await state.recordDiagnosisStarted();
@@ -372,12 +377,21 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Show current progress before resume
+    // Show current progress before resume (from persisted state, not plan)
     const progressBefore = missionState.getProgress();
     console.log(`📊 Progress before resume: ${progressBefore.completed}/${progressBefore.total} delegations passed`);
     console.log(`📌 Status: ${mission.status}`);
 
-    // Prepare state for resume: reset running delegations, set status
+    // Show repair history for failed delegations
+    const failedDels = missionState.getDelegations().filter((d) => d.status === "failed" && !d.retryOf);
+    for (const del of failedDels) {
+      const repairCount = missionState.getRepairAttemptCount(del.id);
+      const maxRepairs = mission.constraints?.maxRepairs ?? 3;
+      const exhausted = missionState.isBudgetExhausted(del.id);
+      console.log(`   ⚠️  ${del.title} (${del.id}): ${repairCount}/${maxRepairs} repairs${exhausted ? " - BUDGET EXHAUSTED" : ""}`);
+    }
+
+    // Prepare state for resume: reset only running delegations, preserve all history
     const { plan, delegations } = await missionState.prepareForResume();
 
     if (!plan) {
@@ -396,11 +410,11 @@ async function main(): Promise<void> {
     console.log(`📁 Workspace: ${workspaceDir}`);
     console.log(`📋 Plan: ${plan.id} (${plan.delegations.length} delegations)`);
 
-    // Count how many delegations are already done
+    // Show resume state from persisted delegation history
     const resumeState = missionState.getResumeState();
-    console.log(`✅ Already completed: ${resumeState.completed.size}`);
-    console.log(`❌ Already failed/blocked: ${resumeState.failed.size}`);
-    console.log(`🔄 Will resume: ${delegations.length - resumeState.completed.size - resumeState.failed.size} delegations`);
+    console.log(`✅ Completed (skipped): ${resumeState.completed.size}`);
+    console.log(`❌ Failed/repair-delegations (skipped): ${resumeState.failed.size}`);
+    console.log(`🔄 Will attempt: ${resumeState.resumable.size} delegations`);
 
     // Validate workspace exists
     const fs = await import("node:fs/promises");
@@ -432,8 +446,11 @@ async function main(): Promise<void> {
       modelRouter,
     });
 
+    // Roblox missions validate with the Rojo validator; Web uses npm build.
+    const isResumeRoblox = mission.context?.engine === "roblox";
     const validation = {
-      buildCommand: "npm run build",
+      buildCommand: isResumeRoblox ? undefined : "npm run build",
+      engine: isResumeRoblox ? "roblox" : "web",
       timeoutMs: 120_000,
       maxRepairAttempts: 3,
     };
@@ -543,6 +560,14 @@ async function main(): Promise<void> {
 
   const mission = createMission(goal, context, constraints);
 
+  // Production Blueprint: structured pre-implementation contract carried on
+  // the mission so every specialist receives a slice of it via handoff.
+  try {
+    (mission as any).blueprint = deriveBlueprintFromGoal(goal);
+  } catch {
+    // Blueprint derivation never blocks mission creation.
+  }
+
   let plan: ExecutionPlan;
   if (readOnly) {
     const readOnlyPlanner = createReadOnlyPlanner({ maxDelegations: 1 });
@@ -616,8 +641,11 @@ async function main(): Promise<void> {
   // an explicit production executor to be provided.
   const peerReview = undefined;
 
+  // Roblox missions validate with the Rojo validator; Web uses npm build.
+  const isMainRoblox = goalEngine.kind === "roblox";
   const validation = {
-    buildCommand: "npm run build",
+    buildCommand: isMainRoblox ? undefined : "npm run build",
+    engine: isMainRoblox ? "roblox" : "web",
     timeoutMs: 120_000,
     maxRepairAttempts: 3,
   };
@@ -653,6 +681,19 @@ async function main(): Promise<void> {
 
   console.log("\n🚀 Starting mission execution...\n");
 
+  // Single-Studio policy: only one mission may drive Roblox Studio at a
+  // time. Contended → honest BLOCKED error, never a second Studio instance.
+  let studioLock: LockHandle | null = null;
+  if (isMainRoblox) {
+    studioLock = await acquireLock(baseDir, studioLockName());
+    if (!studioLock) {
+      console.error("❌ BLOCKED (infrastructure): another mission holds the Roblox Studio singleton lock.");
+      console.error("Queue this mission instead of opening a second Studio.");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   try {
     const finalMission = await orchestrator.executeMission(mission, plan);
 
@@ -679,6 +720,7 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   } finally {
     pixelOfficeReporter?.stop();
+    await studioLock?.release();
   }
 }
 

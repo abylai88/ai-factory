@@ -1,0 +1,15 @@
+{
+  "ClassName": "Part",
+  "Properties": {
+    "Name": "SouthWall",
+    "Size": [102, 6, 1],
+    "Position": [0, 2.5, -50.5],
+    "Anchored": true,
+    "CanCollide": true,
+    "Material": "Plastic",
+    "Color": [0.4, 0.4, 0.4],
+    "Transparency": 0.5,
+    "TopSurface": "Smooth",
+    "BottomSurface": "Smooth"
+  }
+}

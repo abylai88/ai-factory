@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { AgentRole, Delegation, Mission } from "./mission.js";
+import { AgentRoleSchema } from "./mission.js";
 
 // MissionArtifact is a top-level artifact in the mission's artifact store.
 // It shares the shape of DelegationArtifact but adds missionId so that
@@ -197,6 +199,38 @@ export class ArtifactStore {
     return this.artifacts.size;
   }
 
+  /**
+   * Export all artifacts as plain data for persistence through
+   * MissionState (the single persistence system). Deterministic order.
+   */
+  exportState(): MissionArtifact[] {
+    return this.getArtifactsForMission().map((a) => ({ ...a }));
+  }
+
+  /**
+   * Restore artifacts previously exported with exportState(). Invalid
+   * entries are skipped (never crash resume on one bad record).
+   */
+  importState(list: unknown): { imported: number; skipped: number } {
+    let imported = 0;
+    let skipped = 0;
+    if (!Array.isArray(list)) return { imported, skipped };
+    for (const item of list.slice(0, this.config.maxArtifactsPerMission)) {
+      const parsed = MissionArtifactSchema.safeParse(item);
+      if (!parsed.success) {
+        skipped++;
+        continue;
+      }
+      if (parsed.data.missionId !== this.missionId) {
+        skipped++;
+        continue;
+      }
+      this.artifacts.set(parsed.data.id, parsed.data);
+      imported++;
+    }
+    return { imported, skipped };
+  }
+
   private formatTypeLabel(type: MissionArtifact["type"]): string {
     switch (type) {
       case "file":
@@ -225,3 +259,18 @@ export class ArtifactStore {
 export function createArtifactStore(mission: Mission, config?: ArtifactStoreConfig): ArtifactStore {
   return new ArtifactStore(mission.id, config);
 }
+
+// ── Persistence (via MissionState — the single persistence system) ──
+
+export const MissionArtifactSchema = z.object({
+  id: z.string().min(1).max(100),
+  missionId: z.string().min(1).max(100),
+  delegationId: z.string().min(1).max(100),
+  type: z.enum(["file", "research", "design", "code", "test", "report"]),
+  path: z.string().max(500).optional(),
+  title: z.string().min(1).max(300),
+  summary: z.string().max(2000),
+  createdByRole: AgentRoleSchema,
+  createdAt: z.string(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});

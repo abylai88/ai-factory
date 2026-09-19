@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-export type EngineKind = "web" | "unity" | "unknown";
+export type EngineKind = "web" | "roblox" | "unity" | "unknown";
 
 export interface EngineInfo {
   kind: EngineKind;
@@ -30,6 +30,15 @@ const UNITY_KEYWORDS = [
   "unity", "3d", "2d-game", "mobile 3d", "gameobject", "c#", "csharp"
 ];
 
+const ROBLOX_KEYWORDS = [
+  "roblox",
+  "roblox studio",
+  "luau",
+  "rojo",
+  "roblox game",
+  "roblox simulator"
+];
+
 /**
  * Classify the target engine for a NEW game goal. This deliberately does NOT
  * look at any existing project on disk — the engine is decided from the goal
@@ -53,6 +62,15 @@ export function classifyGoal(
         reason: `Explicit engine requested: ${explicit}`
       };
     }
+    if (e === "roblox" || e === "luau") {
+      return {
+        kind: "roblox",
+        stack: "Roblox + Luau + Rojo",
+        supported: true,
+        reason: `Explicit engine requested: ${explicit}`
+      };
+    }
+
     if (e === "unity") {
       return {
         kind: "unity",
@@ -69,12 +87,21 @@ export function classifyGoal(
     };
   }
 
+  if (ROBLOX_KEYWORDS.some((k) => g.includes(k))) {
+    return {
+      kind: "roblox",
+      stack: "Roblox + Luau + Rojo",
+      supported: true,
+      reason: `Goal classified as a Roblox game (keyword match: ${g}).`
+    };
+  }
+
   if (UNITY_KEYWORDS.some((k) => g.includes(k))) {
     return {
       kind: "unity",
       supported: false,
       reason:
-        "Goal looks like a Unity/3D game, but no Unity adapter/template exists. " +
+        "Goal looks like a Unity/3D game, but no Unity adapter/template exists yet. " +
         "WEB (Phaser + TypeScript + Webpack) is the supported engine."
     };
   }
@@ -103,6 +130,22 @@ export function classifyGoal(
  * is provided explicitly (e.g. improving an already-initialized workspace).
  */
 export async function detectEngine(projectDir: string): Promise<EngineInfo> {
+  const robloxMarkers = [
+    "default.project.json",
+    "src/ServerScriptService",
+  ];
+
+  for (const marker of robloxMarkers) {
+    if (await pathExists(path.join(projectDir, marker))) {
+      return {
+        kind: "roblox",
+        stack: "Roblox + Luau + Rojo",
+        supported: true,
+        reason: "Roblox/Rojo project detected.",
+      };
+    }
+  }
+
   const unityMarkers = [
     "ProjectSettings/ProjectVersion.txt",
     "Assets",

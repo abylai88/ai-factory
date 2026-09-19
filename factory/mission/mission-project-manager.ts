@@ -6,6 +6,8 @@ import {
 } from "./mission.js";
 import { runGoal } from "../pipeline/pipeline-runner.js";
 import { ProjectProvisioner, ProjectHandle } from "./project-provisioner.js";
+import { ensureProjectDependencies } from "../setup/project-bootstrap.js";
+import { isRobloxProjectDir } from "../roblox/platform.js";
 
 /**
  * MissionProjectManager — bridges mission context to project provisioning.
@@ -112,6 +114,27 @@ export class MissionAwareFactoryAdapter implements FactoryExecutionAdapter {
   ): Promise<AgentResult> {
     const resolved = await this.config.projectManager.resolveProject(mission);
     this._lastResolved = resolved;
+
+    // Deterministic dependency recovery BEFORE delegating to the (expensive)
+    // pipeline: if node_modules or required local binaries are missing,
+    // reinstall from the project's own package.json/package-lock.json and
+    // then proceed. A bootstrap failure is infrastructure — return it
+    // directly instead of running agents into a broken workspace.
+    // Roblox/Rojo projects have no npm lifecycle and skip this entirely.
+    if (!(await isRobloxProjectDir(resolved.projectPath))) {
+      const bootstrap = await ensureProjectDependencies(resolved.projectPath, {
+        templateId: resolved.templateId,
+      });
+      if (!bootstrap.ok) {
+        return {
+          delegationId: delegation.id,
+          status: "failed",
+          output: "",
+          error: bootstrap.error,
+          durationMs: 0,
+        };
+      }
+    }
 
     return this.innerAdapter.runDelegation(delegation, mission, {
       baseDir: config.baseDir,

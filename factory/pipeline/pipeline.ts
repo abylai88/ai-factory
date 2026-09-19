@@ -16,6 +16,8 @@ export interface Pipeline {
   steps: PipelineStep[];
 }
 
+import { isRobloxGoal } from "../roblox/platform.js";
+
 /**
  * Full game production pipeline — runs all specialized game agents
  * from market research through release.
@@ -24,10 +26,13 @@ export interface Pipeline {
  *         architect → programmer → content → monetization → tester →
  *         bugfix → retest → reviewer → build → release
  */
+
 export function createFullGamePipeline(goal: string): Pipeline {
+  const roblox = isRobloxGoal(goal);
+
   return {
     id: `game-prod-${Date.now()}`,
-    name: "Game Production Pipeline",
+    name: roblox ? "Roblox Game Production Pipeline" : "Game Production Pipeline",
     goal,
     type: "game",
 
@@ -46,7 +51,7 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "research",
         agent: "competitor",
         description:
-          "Исследуй прямых и косвенных конкурентов. Определи их сильные и слабые стороны, возможности для дифференциации и приоритеты фич."
+          "Read the project's GDD and existing docs in docs/. Based ONLY on project-local files (no web research), write docs/competitor-analysis.md with direct competitors, differentiation opportunities, and feature priorities. Stop after writing the artifact."
       },
       {
         id: "idea",
@@ -62,7 +67,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "game",
         agent: "director",
         description:
-          "Разработай подробный GDD: видение, механики, системы, прогрессия, UX-поток, структура контента и приоритеты продакшена. Определи архитектуру сцен Phaser."
+          roblox
+            ? "Разработай подробный GDD для Roblox: видение, механики, системы, прогрессия, UX-поток, структура контента и приоритеты продакшена. Определи Roblox gameplay/service architecture и разделение server/client."
+            : "Разработай подробный GDD: видение, механики, системы, прогрессия, UX-поток, структура контента и приоритеты продакшена. Определи архитектуру сцен Phaser."
       },
       {
         id: "gameplay",
@@ -70,7 +77,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "game",
         agent: "gameplay",
         description:
-          "Детально проработай геймплейные механики: физику, тюнинг, feedback-системы, juice-эффекты, обработку ввода и кривую сложности."
+          roblox
+            ? "Детально проработай геймплейные механики для Roblox: server-authoritative логику, RemoteEvents/RemoteFunctions, feedback-системы, обработку ввода и кривую сложности. Доверенное состояние — только на сервере."
+            : "Детально проработай геймплейные механики: физику, тюнинг, feedback-системы, juice-эффекты, обработку ввода и кривую сложности."
       },
       {
         id: "design",
@@ -86,7 +95,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "engineering",
         agent: "architect",
         description:
-          "Спроектируй техническую архитектуру: модульную структуру, управление состоянием, потоки данных, конфигурацию сборки. Определи риски."
+          roblox
+            ? "Спроектируй техническую архитектуру Roblox-игры: ModuleScripts в ReplicatedStorage, серверные скрипты в ServerScriptService, клиентские LocalScripts в StarterPlayer/StarterGui, RemoteEvents/RemoteFunctions, DataStore-персистентность, server-authoritative границы. Определи риски."
+            : "Спроектируй техническую архитектуру: модульную структуру, управление состоянием, потоки данных, конфигурацию сборки. Определи риски."
       },
       {
         id: "implementation",
@@ -94,7 +105,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "engineering",
         agent: "programmer",
         description:
-          "Реализуй игровой код на TypeScript/Phaser 3 по архитектурному плану. Следуй конвенциям проекта. Проверяй сборку и typecheck после изменений."
+          roblox
+            ? "Read the GDD and design docs in docs/. Read existing Luau source in src/. Implement the Roblox game in Luau by editing source files. Follow Roblox server/client conventions and the existing Rojo structure. Keep server-authoritative gameplay logic on the server and shared/client code in the appropriate services. Validate the Rojo project structure and report files changed."
+            : "Read the GDD and design docs in docs/. Read existing source in src/. Implement the game code in TypeScript/Phaser 3 by editing source files. Follow project conventions. After editing, run npm run build or npx tsc --noEmit to verify. Fix build errors yourself. Report files changed and build result."
       },
       {
         id: "content",
@@ -102,7 +115,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "game",
         agent: "content",
         description:
-          "Создай данные уровней, конфигурации, строки интерфейса, структуры данных. Обеспечь data-driven подход и интеграцию с игровой логикой."
+          roblox
+            ? "Создай игровой контент как Luau ModuleScripts и конфигурации (баланс, уровни, строки интерфейса). Обеспечь data-driven подход и интеграцию с серверной игровой логикой."
+            : "Создай данные уровней, конфигурации, строки интерфейса, структуры данных. Обеспечь data-driven подход и интеграцию с игровой логикой."
       },
       {
         id: "monetization",
@@ -110,7 +125,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "game",
         agent: "monetization",
         description:
-          "Разработай стратегию монетизации: размещение рекламы, вознаграждения, IAP, интеграция с Yandex Games SDK. Определи KPI-цели."
+          roblox
+            ? "Разработай стратегию монетизации для Roblox: game passes, developer products, retention loops и другие подходящие Roblox-механики. Не внедряй платёжный код на этом этапе; опиши точки интеграции и ограничения."
+            : "Разработай стратегию монетизации: размещение рекламы, вознаграждения, IAP, интеграция с Yandex Games SDK. Определи KPI-цели."
       },
       {
         id: "test",
@@ -118,7 +135,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "qa",
         agent: "tester",
         description:
-          "Проверь результат: запусти сборку, typecheck, протестируй игровой flow. Ищи regressions, runtime-проблемы и ошибки. Не исправляй код."
+          roblox
+            ? "Проверь Roblox-проект: валидируй default.project.json, структуру src/, Luau scripts и server/client boundaries. Запусти доступную Rojo-проверку/build, если инструмент доступен. Ищи runtime- и структурные ошибки. Не исправляй код."
+            : "Проверь результат: запусти сборку (npm run build), typecheck, протестируй игровой flow. Ищи regressions, runtime-проблемы и ошибки. Не исправляй код."
       },
       {
         id: "review",
@@ -134,7 +153,9 @@ export function createFullGamePipeline(goal: string): Pipeline {
         role: "engineering",
         agent: "builder",
         description:
-          "Запусти production build, убедись что проект собирается без ошибок. Исправь только проблемы сборки."
+          roblox
+            ? "Проведи production validation Roblox-проекта. Используй доступный Rojo build/validation и убедись, что default.project.json и Luau source собираются в валидный place artifact. Исправляй только проблемы сборки/структуры."
+            : "Запусти production build (npm run build), убедись что проект собирается без ошибок. Исправь только проблемы сборки."
       },
       {
         id: "release",
@@ -155,9 +176,11 @@ export function createFullGamePipeline(goal: string): Pipeline {
 export function createGameImprovementPipeline(
   goal: string
 ): Pipeline {
+  const roblox = isRobloxGoal(goal);
+
   return {
     id: `game-${Date.now()}`,
-    name: "Game Improvement Pipeline",
+    name: roblox ? "Roblox Game Improvement Pipeline" : "Game Improvement Pipeline",
     goal,
     type: "game" as const,
 
@@ -168,7 +191,9 @@ export function createGameImprovementPipeline(
         role: "research",
         agent: "researcher",
         description:
-          "Изучи проект, архитектуру и игровой flow. Найди подтверждённые проблемы и возможности улучшения. Ничего не изменяй."
+          roblox
+            ? "Изучи Roblox-проект: структуру Rojo (default.project.json, src/), Luau-исходники и server/client boundaries. Найди подтверждённые проблемы и возможности улучшения. Ничего не изменяй."
+            : "Изучи проект, архитектуру и игровой flow. Найди подтверждённые проблемы и возможности улучшения. Ничего не изменяй."
       },
 
       {
@@ -177,7 +202,9 @@ export function createGameImprovementPipeline(
         role: "designer",
         agent: "designer",
         description:
-          "На основе цели и результатов Researcher разработай практическое решение. Код не изменяй. Определи конкретные изменения, приоритеты и критерии успеха."
+          roblox
+            ? "На основе цели и результатов Researcher разработай практическое решение для Roblox: конкретные Luau-изменения, server/client размещение, приоритеты и критерии успеха. Код не изменяй."
+            : "На основе цели и результатов Researcher разработай практическое решение. Код не изменяй. Определи конкретные изменения, приоритеты и критерии успеха."
       },
 
       {
@@ -186,7 +213,9 @@ export function createGameImprovementPipeline(
         role: "engineering",
         agent: "builder",
         description:
-          "На основе результатов Researcher и Designer реализуй согласованное решение в проекте. Не делай unrelated changes. После реализации проверь изменения."
+          roblox
+            ? "На основе результатов Researcher и Designer реализуй согласованное решение в Luau, соблюдая server/client boundaries Rojo-проекта (server-authoritative логика — на сервере). Не делай unrelated changes. После реализации проверь структуру Rojo-проекта."
+            : "На основе результатов Researcher и Designer реализуй согласованное решение в проекте. Не делай unrelated changes. После реализации проверь изменения."
       },
 
       {
@@ -195,7 +224,9 @@ export function createGameImprovementPipeline(
         role: "qa",
         agent: "tester",
         description:
-          "Проверь результат предыдущего этапа. Ищи regressions, runtime problems и ошибки сборки. Не исправляй код без необходимости."
+          roblox
+            ? "Проверь Roblox-проект: валидируй default.project.json, структуру src/, Luau scripts и server/client boundaries. Запусти доступную Rojo-проверку/build, если инструмент доступен. Ищи regressions и структурные ошибки. Не исправляй код без необходимости."
+            : "Проверь результат предыдущего этапа. Ищи regressions, runtime problems и ошибки сборки. Не исправляй код без необходимости."
       },
 
       {
@@ -213,7 +244,9 @@ export function createGameImprovementPipeline(
         role: "engineering",
         agent: "builder",
         description:
-          "Запусти production build и убедись, что проект собирается без ошибок. Исправь только проблемы сборки."
+          roblox
+            ? "Проведи production validation Roblox-проекта. Используй доступный Rojo build/validation и убедись, что default.project.json и Luau source собираются в валидный place artifact. Исправляй только проблемы сборки/структуры. Не запускай npm/webpack."
+            : "Запусти production build и убедись, что проект собирается без ошибок. Исправь только проблемы сборки."
       },
 
       {
@@ -232,9 +265,11 @@ export function createGameImprovementPipeline(
  * Engineering pipeline — for technical tasks, bugfixes, refactoring.
  */
 export function createEngineeringPipeline(goal: string): Pipeline {
+  const roblox = isRobloxGoal(goal);
+
   return {
     id: `eng-${Date.now()}`,
-    name: "Engineering Pipeline",
+    name: roblox ? "Roblox Engineering Pipeline" : "Engineering Pipeline",
     goal,
     type: "engineering",
 
@@ -245,7 +280,9 @@ export function createEngineeringPipeline(goal: string): Pipeline {
         role: "research",
         agent: "researcher",
         description:
-          "Изучи проект, архитектуру и flow. Найди подтверждённые проблемы и возможности улучшения. Ничего не изменяй."
+          roblox
+            ? "Изучи Roblox-проект: структуру Rojo (default.project.json, src/), Luau-исходники и server/client boundaries. Найди подтверждённые проблемы. Ничего не изменяй."
+            : "Изучи проект, архитектуру и flow. Найди подтверждённые проблемы и возможности улучшения. Ничего не изменяй."
       },
       {
         id: "design",
@@ -253,7 +290,9 @@ export function createEngineeringPipeline(goal: string): Pipeline {
         role: "designer",
         agent: "designer",
         description:
-          "На основе цели и результатов Researcher разработай конкретное техническое решение. Код не изменяй."
+          roblox
+            ? "На основе цели и результатов Researcher разработай конкретное техническое решение для Roblox (Luau, server/client размещение). Код не изменяй."
+            : "На основе цели и результатов Researcher разработай конкретное техническое решение. Код не изменяй."
       },
       {
         id: "implementation",
@@ -261,7 +300,9 @@ export function createEngineeringPipeline(goal: string): Pipeline {
         role: "engineering",
         agent: "builder",
         description:
-          "Реализуй согласованное решение в проекте. Не делай unrelated changes. Проверь сборку после изменений."
+          roblox
+            ? "Реализуй согласованное решение в Luau, соблюдая server/client boundaries Rojo-проекта. Не делай unrelated changes. Проверь структуру проекта после изменений. Не запускай npm/webpack."
+            : "Реализуй согласованное решение в проекте. Не делай unrelated changes. Проверь сборку после изменений."
       },
       {
         id: "test",
@@ -269,7 +310,9 @@ export function createEngineeringPipeline(goal: string): Pipeline {
         role: "qa",
         agent: "tester",
         description:
-          "Проверь результат: typecheck, build, тесты. Ищи regressions. Не исправляй код без необходимости."
+          roblox
+            ? "Проверь Roblox-проект: валидируй default.project.json, структуру src/ и Luau scripts. Запусти доступную Rojo-проверку/build, если инструмент доступен. Ищи regressions. Не исправляй код без необходимости."
+            : "Проверь результат: typecheck, build, тесты. Ищи regressions. Не исправляй код без необходимости."
       },
       {
         id: "review",
@@ -285,7 +328,9 @@ export function createEngineeringPipeline(goal: string): Pipeline {
         role: "engineering",
         agent: "builder",
         description:
-          "Запусти production build. Убедись, что проект собирается без ошибок."
+          roblox
+            ? "Проведи production validation Roblox-проекта через доступный Rojo build/validation. Убедись, что проект собирается без ошибок. Не запускай npm/webpack."
+            : "Запусти production build. Убедись, что проект собирается без ошибок."
       },
       {
         id: "release",
@@ -320,7 +365,7 @@ export function selectPipeline(
     /\b(new|create|make|build|develop|начать|создать|разработать)\b/i.test(
       lower
     ) &&
-    /\b(game|игра|arcade|puzzle|clicker|idle|match|casual)\b/i.test(lower);
+    /\b(game|игра|arcade|puzzle|clicker|idle|match|casual|platformer|simulator|roblox|tycoon|obby)\b/i.test(lower);
 
   const isBugfix =
     /\b(fix|bug|error|исправить|ошибка|баг|repair|patch)\b/i.test(lower);

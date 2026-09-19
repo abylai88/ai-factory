@@ -10,6 +10,7 @@ import {
   MissionContext,
 } from "./mission.js";
 import { selectPipeline, PipelineType } from "../pipeline/pipeline.js";
+import { isRobloxGoal } from "../roblox/platform.js";
 
 export interface PlannerConfig {
   maxDelegations: number;
@@ -33,7 +34,7 @@ function classifyMissionGoal(goal: string): { pipelineType: PipelineType; patter
 
   const newGamePatterns = [
     /\b(new|create|make|build|develop|создать|разработать)\b/i,
-    /\b(game|игра|arcade|puzzle|clicker|idle|match|casual|platformer)\b/i,
+    /\b(game|игра|arcade|puzzle|clicker|idle|match|casual|platformer|simulator|roblox|tycoon|obby)\b/i,
   ];
 
   const bugfixPatterns = [
@@ -379,6 +380,10 @@ export class Planner {
   }
 
   private shouldRequireVisualQa(pattern: string, mission: Mission): boolean {
+    // Roblox missions use Rojo structural validation instead of browser Visual QA.
+    if (mission.context?.engine === "roblox" || isRobloxGoal(mission.goal)) {
+      return false;
+    }
     // Read-only missions never require Visual QA
     if (mission.constraints?.requireApproval === false && mission.goal.toLowerCase().includes("inspect")) {
       return false;
@@ -401,7 +406,7 @@ export class Planner {
   ): Delegation {
     const dependsOn = index > 0 ? [previousDelegations[index - 1].id] : [];
 
-    const acceptanceCriteria = this.getAcceptanceCriteria(step.id, step.role);
+    const acceptanceCriteria = this.getAcceptanceCriteria(step.id, step.role, mission.goal);
 
     return createDelegation(
       mission.id,
@@ -418,7 +423,11 @@ export class Planner {
     );
   }
 
-  private getAcceptanceCriteria(stepId: string, role: string): string[] {
+  private getAcceptanceCriteria(stepId: string, role: string, goal?: string): string[] {
+    // Roblox missions get Luau/Rojo-native acceptance criteria — never npm/webpack.
+    if (goal !== undefined && isRobloxGoal(goal)) {
+      return this.getRobloxAcceptanceCriteria(stepId);
+    }
     const criteriaMap: Record<string, string[]> = {
       market: ["Target audience defined", "Market size estimated", "Monetization benchmarks identified"],
       competitor: ["Top 5 competitors analyzed", "Differentiation opportunities identified"],
@@ -434,6 +443,33 @@ export class Planner {
       review: ["Goal alignment verified", "Code quality assessed", "Regression check passed", "Verdict: release / release-with-fixes / block"],
       build: ["Production build succeeds", "No build errors", "Artifact created"],
       release: ["Final build verified", "Tests pass", "Release report generated"],
+      research: ["Codebase analyzed", "Root cause identified", "Issues documented"],
+    };
+
+    return criteriaMap[stepId] ?? [`${stepId} completed successfully`];
+  }
+
+  /**
+   * Luau/Rojo-native acceptance criteria for Roblox missions. No npm,
+   * webpack, TypeScript, Phaser, or Yandex references — the planner must not
+   * generate fake Web commands for Roblox.
+   */
+  private getRobloxAcceptanceCriteria(stepId: string): string[] {
+    const criteriaMap: Record<string, string[]> = {
+      market: ["Target Roblox audience defined", "Comparable Roblox experiences identified", "Roblox monetization benchmarks identified"],
+      competitor: ["Top Roblox competitors analyzed", "Differentiation opportunities identified"],
+      idea: ["Unique selling proposition defined", "Core game loop described", "Key features listed"],
+      director: ["GDD created with vision, mechanics, systems", "Roblox server/client architecture defined", "Production priorities set"],
+      gameplay: ["Server-authoritative mechanics documented", "RemoteEvents/RemoteFunctions specified", "Difficulty curve defined"],
+      design: ["Technical plan with file changes", "Server/client placement defined", "Acceptance criteria defined", "No code modified"],
+      architect: ["ModuleScript structure defined", "Server/client boundaries defined", "DataStore persistence planned", "Risks identified"],
+      implementation: ["Luau code follows server/client conventions", "Trusted game state kept on the server", "Rojo project structure valid"],
+      content: ["Luau configs/ModuleScripts created", "Balance data integrated", "Data-driven approach followed"],
+      monetization: ["Game passes / developer products defined", "Retention loops designed", "Roblox-native monetization planned", "KPIs set"],
+      test: ["default.project.json valid", "Luau sources validated", "Server/client boundaries verified", "No critical issues found"],
+      review: ["Goal alignment verified", "Code quality assessed", "Regression check passed", "Verdict: release / release-with-fixes / block"],
+      build: ["Rojo validation succeeds", "No structural errors", "Place artifact builds where Rojo is available"],
+      release: ["Final project verified", "Validation passes", "Release report generated"],
       research: ["Codebase analyzed", "Root cause identified", "Issues documented"],
     };
 

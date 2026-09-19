@@ -24,6 +24,9 @@ import { MissionPlanner, createMissionPlanner } from "./mission-planner.js";
 import { createModelRouter } from "./model-router.js";
 import { createMissionSupervisor } from "./mission-supervisor.js";
 import { PeerReviewSystem } from "./peer-review.js";
+import { isRobloxGoal } from "../roblox/platform.js";
+import { deriveBlueprintFromGoal } from "./blueprint.js";
+import { acquireLock, studioLockName, type LockHandle } from "./resource-control.js";
 
 export interface GameMissionInput {
   goal: string;
@@ -85,7 +88,7 @@ export async function executeGameMission(
     baseDir,
     templatesDir: `${baseDir}/templates`,
     projectsDir: `${baseDir}/projects`,
-    allowedTemplateIds: ["phaser-generic-web-template", "yagames-phaser-template"],
+    allowedTemplateIds: ["phaser-generic-web-template", "yagames-phaser-template", "roblox-rojo-template"],
   });
   
   let projectId: string;
@@ -102,20 +105,32 @@ export async function executeGameMission(
     projectPath = projectPathCandidate;
   } else {
     // Provision new project
-    const templateId = input.templateId || "phaser-generic-web-template";
+    const templateId =
+      input.templateId ||
+      (isRobloxGoal(input.goal)
+        ? "roblox-rojo-template"
+        : "phaser-generic-web-template");
     const handle = await provisioner.provision(templateId);
     projectId = handle.projectId;
     projectPath = handle.projectPath;
   }
   
   // 4. Create Mission
+  const resolvedTemplate =
+    input.templateId ||
+    (isRobloxGoal(input.goal)
+      ? "roblox-rojo-template"
+      : "phaser-generic-web-template");
+
+  const isRoblox = resolvedTemplate === "roblox-rojo-template";
+
   const context: MissionContext = {
     projectId,
-    engine: "web",
-    stack: "phaser",
-    template: input.templateId || "phaser-generic-web-template",
+    engine: isRoblox ? "roblox" : "web",
+    stack: isRoblox ? "roblox-luau-rojo" : "phaser",
+    template: resolvedTemplate,
     workspace: projectPath,
-    requiresVisualQa: workflowMode === "game",
+    requiresVisualQa: workflowMode === "game" && !isRoblox,
   };
   
   const constraints: MissionConstraints = {
@@ -126,6 +141,14 @@ export async function executeGameMission(
   };
   
   const mission = createMission(input.goal, context, constraints);
+
+  // Production Blueprint: structured pre-implementation contract carried on
+  // the mission so every specialist receives a slice of it via handoff.
+  try {
+    (mission as any).blueprint = deriveBlueprintFromGoal(input.goal);
+  } catch {
+    // Blueprint derivation never blocks mission creation.
+  }
   
   // 5. Create MissionPlanner (Phase 10: OpenCode-backed planning with deterministic fallback)
   const plannerModel = new OpenCodePlannerModel({
@@ -181,7 +204,11 @@ export async function executeGameMission(
   const peerReview = undefined;
 
   const validation = {
-    buildCommand: "npm run build",
+    // Roblox missions validate with the Rojo validator (see ValidationGate);
+    // Web missions keep the existing npm build. Never emit fake commands
+    // such as `npm run build` for Roblox.
+    buildCommand: isRoblox ? undefined : "npm run build",
+    engine: isRoblox ? "roblox" : "web",
     timeoutMs: 120_000,
     maxRepairAttempts: 3,
   };
@@ -195,6 +222,19 @@ export async function executeGameMission(
   const projectManager = new MissionProjectManager({ baseDir, provisioner });
   const innerAdapter = new RealFactoryAdapter();
   const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager }, innerAdapter);
+
+  // Single-Studio policy: only one mission may drive Roblox Studio at a
+  // time. Contended → honest BLOCKED error, never a second Studio instance.
+  let studioLock: LockHandle | null = null;
+  if (isRoblox) {
+    studioLock = await acquireLock(baseDir, studioLockName());
+    if (!studioLock) {
+      throw new Error(
+        "BLOCKED (infrastructure): another mission holds the Roblox Studio singleton lock. " +
+        "Queue this mission instead of opening a second Studio.",
+      );
+    }
+  }
 
   try {
   if (workflowMode === "coding") {
@@ -291,5 +331,6 @@ export async function executeGameMission(
   };
   } finally {
     pixelOfficeReporter?.stop();
+    await studioLock?.release();
   }
 }

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { ensureProjectDependencies } from "../setup/project-bootstrap.js";
 
 /**
  * ProjectProvisioner — safe project creation from allowlisted templates.
@@ -141,6 +142,16 @@ export class ProjectProvisioner {
 
     await fs.mkdir(this.config.projectsDir, { recursive: true });
     await this.copyTemplateDir(templateDir, projectPath);
+
+    // Install the template's declared dependencies reproducibly and verify
+    // the required local binaries exist — BEFORE any agent runs in this
+    // project. Projects without declared toolchains (e.g. minimal test
+    // fixtures) are a no-op. Failures throw as infrastructure errors, never
+    // as agent failures.
+    const bootstrap = await ensureProjectDependencies(projectPath, { templateId });
+    if (!bootstrap.ok) {
+      throw new Error(bootstrap.error);
+    }
 
     return {
       projectId: sanitizedId,

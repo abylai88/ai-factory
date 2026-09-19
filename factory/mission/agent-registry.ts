@@ -57,8 +57,11 @@ const DEFAULT_REGISTRY: AgentCapability[] = [
     preferredTaskTypes: ["research", "analysis", "investigation"],
     canReview: false,
     canSpawnSubtasks: false,
-    preferredModel: "anthropic/claude-3-haiku",
-    fallbackModels: ["openai/gpt-4o-mini"],
+    preferredModel: "opencode/muse-spark-1.3",
+    fallbackModels: [
+      "opencode/mimo-v2.5-free",
+      "opencode/nemotron-3-ultra-free",
+    ],
     maxConcurrency: 3,
   },
   {

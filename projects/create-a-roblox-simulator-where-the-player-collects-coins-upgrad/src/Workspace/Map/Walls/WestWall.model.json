@@ -1,0 +1,15 @@
+{
+  "ClassName": "Part",
+  "Properties": {
+    "Name": "WestWall",
+    "Size": [1, 6, 102],
+    "Position": [-50.5, 2.5, 0],
+    "Anchored": true,
+    "CanCollide": true,
+    "Material": "Plastic",
+    "Color": [0.4, 0.4, 0.4],
+    "Transparency": 0.5,
+    "TopSurface": "Smooth",
+    "BottomSurface": "Smooth"
+  }
+}

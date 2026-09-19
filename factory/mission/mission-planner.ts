@@ -3,6 +3,7 @@ import type { Mission, ExecutionPlan, Delegation, AgentRole } from "./mission.js
 import { createExecutionPlan, createDelegation } from "./mission.js";
 import type { MissionMemory } from "./mission-memory.js";
 import { Planner } from "./planner.js";
+import { isRobloxMission } from "../roblox/platform.js";
 
 // ── Allowed Build/Test Commands ──────────────────────────────────
 // Prevent prompt injection via planner-generated commands.
@@ -15,6 +16,9 @@ const ALLOWED_BUILD_COMMANDS = [
   "npm run build:staging",
   "npx tsc",
   "npx tsc --noEmit",
+  // Roblox/Rojo validation commands (Roblox missions only).
+  "rojo build",
+  "rojo check",
 ];
 
 const ALLOWED_TEST_COMMANDS = [
@@ -26,15 +30,37 @@ const ALLOWED_TEST_COMMANDS = [
   "npx vitest run",
   "npx vitest",
   "npx playwright test",
+  // Roblox/Rojo validation commands (Roblox missions only).
+  "rojo build",
+  "stylua --check",
 ];
 
-function validateBuildCommand(cmd: string): boolean {
+function isNpmCommand(cmd: string): boolean {
+  const t = cmd.trim();
+  return t === "npm" || t.startsWith("npm ") || t.startsWith("npx ");
+}
+
+function isRojoCommand(cmd: string): boolean {
+  const t = cmd.trim();
+  return t === "rojo" || t.startsWith("rojo ");
+}
+
+function validateBuildCommand(cmd: string, roblox = false): boolean {
   const trimmed = cmd.trim();
+  // Cross-platform guard: npm/webpack commands are fake on Roblox, and
+  // Rojo commands are meaningless on Web. Reject both directions.
+  if (roblox && isNpmCommand(trimmed)) return false;
+  if (!roblox && isRojoCommand(trimmed)) return false;
   return ALLOWED_BUILD_COMMANDS.some(allowed => trimmed === allowed || trimmed.startsWith(allowed + " "));
 }
 
-function validateTestCommand(cmd: string): boolean {
+function validateTestCommand(cmd: string, roblox = false): boolean {
   const trimmed = cmd.trim();
+  if (roblox && isNpmCommand(trimmed)) return false;
+  if (!roblox && (isRojoCommand(trimmed) || trimmed.startsWith("stylua "))) {
+    // stylua/rojo test commands are only meaningful on Roblox.
+    return false;
+  }
   return ALLOWED_TEST_COMMANDS.some(allowed => trimmed === allowed || trimmed.startsWith(allowed + " "));
 }
 
@@ -158,12 +184,30 @@ function buildPlannerPrompt(
   goal: string,
   availableRoles: string[],
   memoryContext: string | null,
+  roblox = false,
+  blueprintText?: string,
 ): string {
   const sections: string[] = [];
 
   sections.push("You are a mission planner for an AI software factory.");
   sections.push("Given a high-level goal, produce a structured execution plan.");
   sections.push("");
+
+  if (blueprintText) {
+    sections.push("PRODUCTION BLUEPRINT (Director contract — delegations must serve it, never redefine its core loop):");
+    sections.push(blueprintText.slice(0, 1500));
+    sections.push("");
+  }
+
+  if (roblox) {
+    sections.push("TARGET PLATFORM: Roblox (Luau + Rojo).");
+    sections.push("- Implementation tasks MUST be Luau-specific: ModuleScripts, Script vs LocalScript,");
+    sections.push("  RemoteEvents/RemoteFunctions, server-authoritative gameplay, DataStore persistence.");
+    sections.push("- Validation commands MUST be Rojo-based (e.g. \"rojo build default.project.json -o build.rbxlx\").");
+    sections.push("- NEVER emit npm/npx/webpack/tsc commands for this mission: they do not exist on Roblox");
+    sections.push("  and would be fake commands.");
+    sections.push("");
+  }
 
   if (memoryContext) {
     sections.push("MISSION MEMORY (previous context):");
@@ -199,11 +243,16 @@ function buildPlannerPrompt(
         role: "Developer",
         task: "Description of what this agent should do",
         dependsOn: [],
-        validation: {
-          buildCommand: "npm run build",
-          testCommand: "npm test",
-          acceptanceCriteria: ["Criterion 1", "Criterion 2"],
-        },
+        validation: roblox
+          ? {
+            buildCommand: "rojo build default.project.json -o build.rbxlx",
+            acceptanceCriteria: ["Criterion 1", "Criterion 2"],
+          }
+          : {
+            buildCommand: "npm run build",
+            testCommand: "npm test",
+            acceptanceCriteria: ["Criterion 1", "Criterion 2"],
+          },
       },
     ],
     risks: [
@@ -256,10 +305,32 @@ export class MissionPlanner {
       memoryContext = memory.buildContextBlock();
     }
 
+    // Platform-aware planning: Roblox missions get Luau/Rojo instructions
+    // and Rojo validation commands — never npm.
+    const roblox = isRobloxMission(mission);
+
+    // Attach the Production Blueprint summary so the planning model serves
+    // the Director contract instead of inventing its own direction.
+    let blueprintText: string | undefined;
+    try {
+      const { deriveBlueprintFromGoal } = await import("./blueprint.js");
+      const bp = deriveBlueprintFromGoal(mission.goal);
+      blueprintText = [
+        `genre: ${bp.genre} (${bp.platform})`,
+        `core loop: ${bp.coreLoop}`,
+        `systems: ${bp.requiredSystems.join(", ")}`,
+        `acceptance: ${bp.acceptanceCriteria.join("; ")}`,
+      ].join("\n");
+    } catch {
+      blueprintText = undefined;
+    }
+
     const prompt = buildPlannerPrompt(
       mission.goal,
       this.config.availableRoles,
       memoryContext,
+      roblox,
+      blueprintText,
     );
 
     let lastError: Error | null = null;
@@ -278,7 +349,7 @@ export class MissionPlanner {
           );
         }
 
-        return normalizePlan(mission, validated);
+        return normalizePlan(mission, validated, roblox);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         continue;
@@ -317,10 +388,10 @@ function parseLlmJson(raw: string): unknown {
 
 // ── Plan Normalization ────────────────────────────────────────
 
-function normalizePlan(mission: Mission, plan: MissionPlan): ExecutionPlan {
+function normalizePlan(mission: Mission, plan: MissionPlan, roblox = false): ExecutionPlan {
   const objectives = buildObjectives(plan);
   const delegations = plan.delegations.map((pd) =>
-    convertToDelegation(mission, pd)
+    convertToDelegation(mission, pd, roblox)
   );
 
   const risks = plan.risks.map((r, i) => ({
@@ -365,7 +436,7 @@ function buildObjectives(plan: MissionPlan): Array<{ id: string; title: string; 
   return objectives;
 }
 
-function convertToDelegation(mission: Mission, pd: PlannedDelegation): Delegation {
+function convertToDelegation(mission: Mission, pd: PlannedDelegation, roblox = false): Delegation {
   const roleToPipelineType: Record<string, "game" | "engineering"> = {
     Developer: "engineering",
     Architect: "engineering",
@@ -388,17 +459,18 @@ function convertToDelegation(mission: Mission, pd: PlannedDelegation): Delegatio
 
   if (pd.validation?.buildCommand) {
     const cmd = pd.validation.buildCommand.trim();
-    if (validateBuildCommand(cmd)) {
+    if (validateBuildCommand(cmd, roblox)) {
       descriptionParts.push("");
       descriptionParts.push(`BUILD_COMMAND: ${cmd}`);
     } else {
-      // Log warning but don't include invalid command in delegation
+      // Log warning but don't include invalid command in delegation.
+      // For Roblox this also strips fake npm commands the model may emit.
       console.warn(`[MissionPlanner] Rejected invalid buildCommand: ${cmd}`);
     }
   }
   if (pd.validation?.testCommand) {
     const cmd = pd.validation.testCommand.trim();
-    if (validateTestCommand(cmd)) {
+    if (validateTestCommand(cmd, roblox)) {
       descriptionParts.push("");
       descriptionParts.push(`TEST_COMMAND: ${cmd}`);
     } else {

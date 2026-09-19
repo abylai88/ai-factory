@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { EngineInfo } from "../engine/engine.js";
+import { ensureProjectDependencies } from "./project-bootstrap.js";
+import { ROBLOX_TEMPLATE_ID as ROBLOX_PLATFORM_TEMPLATE_ID } from "../roblox/platform.js";
 
 /**
  * ProjectSetup / TemplateManager layer.
@@ -18,7 +20,7 @@ import { EngineInfo } from "../engine/engine.js";
 
 export interface TemplateDescriptor {
   id: string;
-  engine: "web";
+  engine: "web" | "roblox";
   stack: string;
   dir: string;
   rootMarkers: string[];
@@ -47,6 +49,9 @@ export const GENERIC_TEMPLATE_ID = "phaser-generic-web-template";
 
 /** Template ID for the legacy Yandex-specific Phaser template. */
 export const LEGACY_TEMPLATE_ID = "yagames-phaser-template";
+
+/** Template ID for the Roblox + Luau + Rojo project template. */
+export const ROBLOX_TEMPLATE_ID: string = ROBLOX_PLATFORM_TEMPLATE_ID;
 
 /** Keywords that indicate the goal is explicitly for Yandex Games platform. */
 const YANDEX_KEYWORDS = ["yandex", "ya-games", "yagames", "яндекс"];
@@ -77,7 +82,10 @@ export const GAME_PIPELINE_AGENTS: readonly string[] = [
   "programmer",
   "content",
   "monetization",
-  "architect"
+  "architect",
+  "visual",
+  "ui",
+  "qa"
 ];
 
 /**
@@ -106,17 +114,46 @@ export class TemplateManager {
     this.templatesDir = path.join(baseDir, "templates");
   }
 
-  /** Build the template descriptor for a WEB project. */
-  async templateFor(engine: EngineInfo, goal?: string): Promise<TemplateDescriptor | null> {
-    if (engine.kind !== "web" || !engine.supported) {
+  /** Build the template descriptor for the requested engine. */
+  async templateFor(
+    engine: EngineInfo,
+    goal?: string
+  ): Promise<TemplateDescriptor | null> {
+    if (!engine.supported) {
       return null;
     }
 
-    // Determine candidate order based on goal content:
-    //  - If the goal mentions Yandex, prefer the legacy Yandex template first.
-    //  - Otherwise, prefer the clean generic template first.
+    // Roblox target
+    if (engine.kind === "roblox") {
+      const dir = path.join(this.templatesDir, ROBLOX_TEMPLATE_ID);
+
+      if (!(await pathExists(dir))) {
+        return null;
+      }
+
+      return {
+        id: ROBLOX_TEMPLATE_ID,
+        engine: "roblox",
+        stack: engine.stack ?? "Roblox + Luau + Rojo",
+        dir,
+        rootMarkers: [
+          "default.project.json",
+          "src",
+          "src/ServerScriptService",
+          "src/ReplicatedStorage"
+        ]
+      };
+    }
+
+    // Existing WEB target
+    if (engine.kind !== "web") {
+      return null;
+    }
+
     const lowerGoal = (goal ?? "").toLowerCase();
-    const isYandexGoal = YANDEX_KEYWORDS.some((kw) => lowerGoal.includes(kw));
+    const isYandexGoal = YANDEX_KEYWORDS.some((kw) =>
+      lowerGoal.includes(kw)
+    );
 
     const candidates = isYandexGoal
       ? [LEGACY_TEMPLATE_ID, GENERIC_TEMPLATE_ID]
@@ -124,13 +161,19 @@ export class TemplateManager {
 
     for (const id of candidates) {
       const dir = path.join(this.templatesDir, id);
+
       if (await pathExists(dir)) {
         return {
           id,
           engine: "web",
           stack: engine.stack ?? "Phaser + TypeScript + Webpack",
           dir,
-          rootMarkers: ["package.json", "configs", "src", "tsconfig.json"]
+          rootMarkers: [
+            "package.json",
+            "configs",
+            "src",
+            "tsconfig.json"
+          ]
         };
       }
     }
@@ -173,8 +216,17 @@ export class TemplateManager {
         const initialized = await this.isInitializedWorkspace(workspaceDir, template);
 
         if (initialized) {
+          // Resume: repair the dependency bootstrap deterministically when
+          // node_modules or required local binaries are missing, BEFORE any
+          // agent runs in this workspace.
+          const bootstrap = await ensureProjectDependencies(workspaceDir, {
+            templateId: template.id,
+          });
+          if (!bootstrap.ok) {
+            throw new Error(bootstrap.error);
+          }
           const deployed = await AgentDeployer.deploy(this.baseDir, workspaceDir);
-          await deployProjectConfig(workspaceDir);
+          await deployProjectConfig(workspaceDir, path.join(this.baseDir, "opencode.json"));
           return {
             templateId: template.id,
             created: false,
@@ -205,8 +257,19 @@ export class TemplateManager {
 
     const copiedFiles = await copyDir(template.dir, workspaceDir, copied, skipped);
 
+    // Fresh scaffold: install the template's declared dependencies
+    // reproducibly (npm ci when the scaffold has a lockfile, npm install
+    // otherwise) and verify the required local binaries exist — BEFORE any
+    // agent runs `npm run build` in this workspace.
+    const bootstrap = await ensureProjectDependencies(workspaceDir, {
+      templateId: template.id,
+    });
+    if (!bootstrap.ok) {
+      throw new Error(bootstrap.error);
+    }
+
     const deployed = await AgentDeployer.deploy(this.baseDir, workspaceDir);
-    await deployProjectConfig(workspaceDir);
+    await deployProjectConfig(workspaceDir, path.join(this.baseDir, "opencode.json"));
 
     return {
       templateId: template.id,
@@ -338,27 +401,64 @@ const FACTORY_OPENCODE_CONFIG = {
 /**
  * Deploy the AI Factory project-level OpenCode configuration.
  * This sets `small_model` to a free model to avoid payment errors on
- * title generation, and disables paid providers.
+ * title generation, and disables paid providers. It also ensures the
+ * `mcp.robloxstudio` configuration from the Factory root is merged in,
+ * so child OpenCode processes launched via TaskRunner can connect to the
+ * robloxstudio MCP bridge.
  */
-async function deployProjectConfig(projectDir: string): Promise<void> {
+export async function deployProjectConfig(
+  projectDir: string,
+  rootOpencodePath: string
+): Promise<void> {
   const configPath = path.join(projectDir, "opencode.json");
 
+  // Read existing project config if present
+  let parsed: Record<string, unknown>;
   try {
     const existing = await fs.readFile(configPath, "utf8");
-    const parsed = JSON.parse(existing);
-
-    if (parsed.small_model) {
-      return;
-    }
+    parsed = JSON.parse(existing);
   } catch {
-    // File doesn't exist or is invalid — write fresh config
+    parsed = {};
   }
 
-  await fs.writeFile(
-    configPath,
-    JSON.stringify(FACTORY_OPENCODE_CONFIG, null, 2),
-    "utf8"
-  );
+  // Ensure project-specific settings are preserved
+  if (!parsed.small_model) {
+    parsed.small_model = FACTORY_OPENCODE_CONFIG.small_model;
+  }
+  if (!Array.isArray(parsed.disabled_providers)) {
+    parsed.disabled_providers = FACTORY_OPENCODE_CONFIG.disabled_providers;
+  }
+
+  // Merge robloxstudio MCP from the Factory root config, if present
+  try {
+    const rootConfigContent = await fs.readFile(rootOpencodePath, "utf8");
+    const rootConfig = JSON.parse(rootConfigContent);
+    const rootMcp = rootConfig.mcp?.robloxstudio;
+    if (rootMcp) {
+      // Ensure mcp object exists on the parsed config
+      let projectMcp: Record<string, unknown> = {};
+      if (parsed.mcp instanceof Object && !(parsed.mcp instanceof Array)) {
+        projectMcp = parsed.mcp as Record<string, unknown>;
+      }
+      // Start with existing project MCP, then overlay root robloxstudio
+      parsed.mcp = {
+        ...projectMcp,
+        robloxstudio: {
+          type: rootMcp.type,
+          url: rootMcp.url,
+          oauth: rootMcp.oauth,
+          headers: {
+            ...(rootMcp.headers as Record<string, string> | {}),
+            ...((projectMcp.robloxstudio as Record<string, unknown> | undefined)?.headers || {})
+          }
+        }
+      } as Record<string, unknown>;
+    }
+  } catch {
+    // Root config not found — that's OK, the MCP config may be set manually
+  }
+
+  await fs.writeFile(configPath, JSON.stringify(parsed, null, 2), "utf8");
 }
 
 /** Convenience: resolve the default project workspace dir from a goal. */

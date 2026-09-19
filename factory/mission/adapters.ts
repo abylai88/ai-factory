@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { envWithLocalBin } from "../setup/project-bootstrap.js";
 import {
   Mission,
   Delegation,
@@ -371,6 +372,9 @@ export class ControlledBuildAdapter implements FactoryExecutionAdapter {
           timeout: 120_000,
           maxBuffer: 1024 * 1024,
           encoding: "utf8",
+          // Resolve build tools from the PROJECT's own node_modules first —
+          // never silently rely on globally installed webpack/typescript.
+          env: envWithLocalBin(cwd),
         }, (error, stdout, stderr) => {
           if (error) {
             reject(error);

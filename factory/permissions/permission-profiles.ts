@@ -52,6 +52,18 @@ export const SAFE_BUILD_TEST: BashPermission[] = [
   { pattern: "npm run check*", action: "allow" }
 ];
 
+// ─── Safe Roblox/Rojo Commands ────────────────────────────────────
+// Read-only validation and build commands for Roblox/Rojo projects.
+// These are the Roblox equivalents of the npm/tsc toolchain above:
+// agents working on a Rojo project validate with `rojo build` instead of
+// `npm run build`. Never allow package-manager writes here.
+export const SAFE_ROBLOX_COMMANDS: BashPermission[] = [
+  { pattern: "rojo", action: "allow" },
+  { pattern: "rojo *", action: "allow" },
+  { pattern: "stylua *", action: "allow" },
+  { pattern: "lune *", action: "allow" }
+];
+
 // ─── Profile Definitions ──────────────────────────────────────────
 
 export const PROFILES: Record<string, PermissionProfile> = {
@@ -61,6 +73,7 @@ export const PROFILES: Record<string, PermissionProfile> = {
       ...SECURITY_DENIALS,
       ...SAFE_READ_ONLY,
       ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS,
       { pattern: "npm run _*", action: "allow" },
       { pattern: "npm run dev", action: "ask" }
     ],
@@ -72,7 +85,8 @@ export const PROFILES: Record<string, PermissionProfile> = {
     bash: [
       ...SECURITY_DENIALS,
       ...SAFE_READ_ONLY,
-      ...SAFE_BUILD_TEST
+      ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS
     ],
     todowrite: "deny"
   },
@@ -83,6 +97,7 @@ export const PROFILES: Record<string, PermissionProfile> = {
       ...SECURITY_DENIALS,
       ...SAFE_READ_ONLY,
       ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS,
       { pattern: "npm run _*", action: "ask" },
       { pattern: "npm install*", action: "ask" },
       { pattern: "npx webpack*", action: "allow" }
@@ -96,6 +111,7 @@ export const PROFILES: Record<string, PermissionProfile> = {
       ...SECURITY_DENIALS,
       ...SAFE_READ_ONLY,
       ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS,
       { pattern: "npm run _*", action: "ask" },
       { pattern: "npm install*", action: "ask" },
       { pattern: "npx webpack*", action: "allow" }
@@ -144,7 +160,8 @@ export const PROFILES: Record<string, PermissionProfile> = {
     bash: [
       ...SECURITY_DENIALS,
       ...SAFE_READ_ONLY,
-      ...SAFE_BUILD_TEST
+      ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS
     ],
     todowrite: "deny"
   },
@@ -172,7 +189,8 @@ export const PROFILES: Record<string, PermissionProfile> = {
     bash: [
       ...SECURITY_DENIALS,
       ...SAFE_READ_ONLY,
-      ...SAFE_BUILD_TEST
+      ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS
     ],
     todowrite: "deny"
   },
@@ -192,9 +210,54 @@ export const PROFILES: Record<string, PermissionProfile> = {
       ...SECURITY_DENIALS,
       ...SAFE_READ_ONLY,
       ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS,
       { pattern: "npm run _*", action: "ask" }
     ],
     todowrite: "allow"
+  },
+
+  // ─── Tool-layer roles (agent → tool-registry bridge) ─────────────
+  // Visual builds the 3D world via Studio tools (inspect/create/modify,
+  // terrain/lighting/material, asset search/insert, screenshot, playtest).
+  // Edit stays deny: world changes go through Studio instances, not raw
+  // filesystem writes outside the tool layer.
+  visual: {
+    edit: "deny",
+    bash: [
+      ...SECURITY_DENIALS,
+      ...SAFE_READ_ONLY,
+      ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS
+    ],
+    todowrite: "deny"
+  },
+
+  // UI owns ScreenGui/UI via Studio UI tools + screenshots + playtest.
+  ui: {
+    edit: "deny",
+    bash: [
+      ...SECURITY_DENIALS,
+      ...SAFE_READ_ONLY,
+      ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS
+    ],
+    todowrite: "deny"
+  },
+
+  // QA runs the playtest/visual-runtime gate (play, stop, screenshot,
+  // output, inspect, assertions). Mirrors tester; both map to the QA tool
+  // set in factory/tools/roles.ts.
+  qa: {
+    edit: "deny",
+    bash: [
+      ...SECURITY_DENIALS,
+      ...SAFE_READ_ONLY,
+      ...SAFE_BUILD_TEST,
+      ...SAFE_ROBLOX_COMMANDS,
+      { pattern: "npm run _*", action: "allow" },
+      { pattern: "npm run dev", action: "ask" }
+    ],
+    todowrite: "deny"
   }
 };
 

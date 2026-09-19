@@ -28,6 +28,9 @@ import { classifyDiagnosis, generateRepairPlan } from "./diagnosis.js";
 import { classifyFailure, buildTriagePrompt, type TriageResult } from "./failure-triage.js";
 import { MissionMemory, createMissionMemory } from "./mission-memory.js";
 import type { MissionPlanner } from "./mission-planner.js";
+import { deriveBlueprintFromGoal, blueprintSliceForRole } from "./blueprint.js";
+import { buildDirectorVision, renderDirectorVision } from "./director-vision.js";
+import { RepairHistory } from "./repair-history.js";
 import { PeerReviewSystem, defaultReviewExecutor, type ReviewExecutor, type ReviewRequest, type ReviewResult } from "./peer-review.js";
 import { ArtifactStore, type MissionArtifact } from "./artifact-store.js";
 import type { MissionSupervisor } from "./mission-supervisor.js";
@@ -91,6 +94,7 @@ export class MissionOrchestrator {
   private dynamicDelegationCount = 0;
   private replanCount = 0;
   private artifactStore: ArtifactStore | null = null;
+  private repairHistory: RepairHistory | null = null;
   private delegationStartTimes = new Map<string, number>();
   private currentAbortController: AbortController | null = null;
 
@@ -137,9 +141,70 @@ export class MissionOrchestrator {
     this.isRunning = true;
     this.memory = createMissionMemory(this.config.missionState, this.config.eventSink);
     this.artifactStore = new ArtifactStore(mission.id);
+    this.repairHistory = new RepairHistory(this.config.maxRepairs ?? 3);
     this.dynamicDelegations = [];
     this.dynamicDelegationCount = 0;
     this.replanCount = 0;
+
+    // Restore persisted memory from MissionState (survives process restarts;
+    // on a fresh mission these are empty). Invalid entries are skipped.
+    try {
+      const persistedArtifacts = this.config.missionState.getArtifacts();
+      if (persistedArtifacts.length > 0) {
+        this.artifactStore.importState(persistedArtifacts);
+      }
+      const persistedRepairs = this.config.missionState.getRepairRecords();
+      if (persistedRepairs.length > 0) {
+        this.repairHistory.importState(persistedRepairs);
+      }
+    } catch {
+      // Memory hydration never blocks execution.
+    }
+
+    // Production Blueprint: structured pre-implementation contract derived
+    // from the goal (the Director refines it; specialists consume slices).
+    // Derived here so EVERY mission — including resumed ones — has one.
+    try {
+      const blueprint = deriveBlueprintFromGoal(mission.goal);
+      this.currentMission = { ...this.currentMission, blueprint } as Mission;
+      this.publisher.publish({
+        missionId: mission.id,
+        type: "mission.blueprint.created" as any,
+        payload: {
+          genre: blueprint.genre,
+          platform: blueprint.platform,
+          coreLoop: blueprint.coreLoop,
+          systems: blueprint.requiredSystems,
+        },
+      });
+      // Persist the blueprint decision (platform/genre/core loop) so resume
+      // restores direction without re-deriving. Idempotent: skip when an
+      // equivalent blueprint decision already exists.
+      try {
+        const existing = this.config.missionState.getDecisions("blueprint");
+        const same = existing.some((d) => d.detail.includes(blueprint.coreLoop));
+        if (!same) {
+          await this.config.missionState.recordDecision({
+            category: "blueprint",
+            title: `Blueprint: ${blueprint.genre} (${blueprint.platform})`,
+            detail: `Core loop: ${blueprint.coreLoop}. Systems: ${blueprint.requiredSystems.join(", ")}. Acceptance: ${blueprint.acceptanceCriteria.join("; ")}`,
+            rationale: `Derived from goal before implementation; Director contract for all specialists.`,
+            createdBy: "director",
+          });
+          const vision = buildDirectorVision(blueprint);
+          await this.config.missionState.recordDecision({
+            category: "design",
+            title: `Director vision: ${blueprint.genre}`,
+            detail: renderDirectorVision(vision).slice(0, 2000),
+            createdBy: "director",
+          });
+        }
+      } catch {
+        // Decision persistence never blocks execution.
+      }
+    } catch {
+      // Blueprint derivation never blocks execution.
+    }
 
     if (this.config.resume) {
       // Resume mode: mission was already started, don't emit started event again.
@@ -273,7 +338,10 @@ export class MissionOrchestrator {
 
     // Initialize completed/failed sets from persisted state for resume support.
     // On fresh missions, these sets are empty. On resume, they contain
-    // delegations that already completed successfully or failed permanently.
+    // delegations that already completed successfully or failed permanently
+    // (budget exhausted). Repair delegations (retryOf set) are always skipped.
+    // Resumable delegations (failed with budget, blocked, queued) are NOT
+    // added to either set — they'll be processed normally by the graph loop.
     const completed = new Set<string>();
     const failed = new Set<string>();
 
@@ -281,7 +349,14 @@ export class MissionOrchestrator {
       const resumeState = this.config.missionState.getResumeState();
       for (const id of resumeState.completed) completed.add(id);
       for (const id of resumeState.failed) failed.add(id);
+      // resumeState.resumable delegations are NOT added to failed — they will
+      // be processed by the graph loop like any other queued delegation.
     }
+
+    // Track delegations that failed during THIS graph execution (blocked or
+    // executed-but-failed). Pre-existing failures from resume state are NOT
+    // included — they only cause graph failure if their downstreams are blocked.
+    const failedDuringExecution = new Set<string>();
 
     while (delegations.length > 0 && this.isRunning) {
       const ready: Delegation[] = [];
@@ -299,9 +374,26 @@ export class MissionOrchestrator {
         if (depsMet && depsNotFailed) {
           ready.push(del);
         } else if (!depsNotFailed) {
-          // A dependency failed — block this delegation permanently
-          await this.config.missionState.completeDelegation(del.id, "blocked", undefined, "Upstream dependency failed");
-          failed.add(del.id);
+          // A dependency failed. During resume, check if the failed dependency
+          // produced partial artifacts that satisfy the downstream task.
+          const failedDeps = del.dependsOn.filter((depId) => failed.has(depId));
+          const allFailedDepsHaveArtifacts = failedDeps.every((depId) =>
+            this.config.missionState.hasDelegationArtifact(depId)
+          );
+
+          if (allFailedDepsHaveArtifacts && this.config.resume) {
+            // Failed deps have partial artifacts — treat as effectively satisfied
+            // so downstream can use existing artifacts to continue.
+            ready.push(del);
+          } else {
+            // Truly blocked — upstream has no usable artifact or not resume mode
+            const reason = this.config.resume
+              ? "Upstream dependency failed with no usable artifact"
+              : "Upstream dependency failed";
+            await this.config.missionState.completeDelegation(del.id, "blocked", undefined, reason);
+            failed.add(del.id);
+            failedDuringExecution.add(del.id);
+          }
         } else {
           waiting.push(del);
         }
@@ -322,6 +414,7 @@ export class MissionOrchestrator {
           for (const del of waiting) {
             await this.config.missionState.completeDelegation(del.id, "blocked", undefined, "Deadlock: dependencies cannot be satisfied");
             failed.add(del.id);
+            failedDuringExecution.add(del.id);
           }
         }
         break;
@@ -351,6 +444,7 @@ export class MissionOrchestrator {
             completed.add(del.id);
           } else {
             failed.add(del.id);
+            failedDuringExecution.add(del.id);
           }
         }
 
@@ -367,6 +461,7 @@ export class MissionOrchestrator {
             completed.add(del.id);
           } else {
             failed.add(del.id);
+            failedDuringExecution.add(del.id);
           }
         }
       } else {
@@ -384,6 +479,7 @@ export class MissionOrchestrator {
             completed.add(del.id);
           } else {
             failed.add(del.id);
+            failedDuringExecution.add(del.id);
           }
         }
       }
@@ -395,8 +491,10 @@ export class MissionOrchestrator {
       }
     }
 
-    // Any delegation in the failed set (actual failure or blocked-by-failure) means graph fails
-    if (failed.size > 0) {
+    // Fail the graph if any delegation failed or was blocked during THIS execution.
+    // Pre-existing failures from resume state are tolerated if their downstreams
+    // can proceed via partial artifacts.
+    if (failedDuringExecution.size > 0) {
       return false;
     }
     return true;
@@ -538,6 +636,9 @@ export class MissionOrchestrator {
     // Phase 8 Gap 2: Automatically register artifacts from successful delegations
     if (agentResult.status === "passed" && this.artifactStore) {
       this.collectAndRegisterArtifacts(delegation, agentResult);
+      // Persist artifacts so they survive process restarts (meaningful
+      // transition: delegation completed with new artifacts).
+      await this.persistArtifactStore();
     }
 
     // Phase 9: Notify supervisor of completion
@@ -626,6 +727,42 @@ export class MissionOrchestrator {
   }
 
   /**
+   * Build the bounded role-specific handoff block for a delegation.
+   * Returns "" when there is nothing to add (keeps prompts unchanged).
+   */
+  private buildHandoffBlock(delegation: Delegation): string {
+    const parts: string[] = [];
+    const role = delegation.role ?? "Developer";
+    const blueprint = (this.currentMission as any)?.blueprint;
+    if (blueprint && typeof blueprint === "object") {
+      try {
+        parts.push(`BLUEPRINT:\n${blueprintSliceForRole(blueprint as any, String(role)).slice(0, 1000)}`);
+      } catch {
+        // Blueprint slice never blocks execution.
+      }
+    }
+    if (this.memory) {
+      try {
+        const mem = this.memory.buildContextBlock(delegation.id);
+        if (mem && mem.trim()) parts.push(`MISSION MEMORY:\n${mem.slice(0, 1500)}`);
+      } catch {
+        // Memory enrichment is best-effort.
+      }
+    }
+    if (this.artifactStore) {
+      try {
+        const arts = this.artifactStore.buildArtifactContext({ delegation, maxChars: 800 });
+        if (arts && !/\(none\)/.test(arts)) parts.push(arts.slice(0, 800));
+      } catch {
+        // Artifact context is best-effort.
+      }
+    }
+    if (parts.length === 0) return "";
+    const block = `CONTEXT HANDOFF (summarized — original task above is authoritative):\n${parts.join("\n\n")}`;
+    return block.slice(0, 3000);
+  }
+
+  /**
    * Phase 8 Gap 2: Automatically register artifacts produced by a delegation.
    * Parses the agent output for file paths and registers lightweight metadata.
    * Does not store raw file contents.
@@ -686,6 +823,33 @@ export class MissionOrchestrator {
           type: artifact.type,
         },
       });
+    }
+  }
+
+  /**
+   * Persist the in-memory ArtifactStore into MissionState (the single
+   * persistence system). Best-effort: never blocks delegation execution.
+   */
+  private async persistArtifactStore(): Promise<void> {
+    if (!this.artifactStore) return;
+    try {
+      await this.config.missionState.syncArtifacts(this.artifactStore.exportState());
+    } catch {
+      // Persistence is best-effort at this layer; snapshot retry happens on
+      // the next meaningful transition.
+    }
+  }
+
+  /**
+   * Persist the in-memory RepairHistory into MissionState so repeat
+   * detection survives restarts. Best-effort.
+   */
+  private async persistRepairHistory(): Promise<void> {
+    if (!this.repairHistory) return;
+    try {
+      await this.config.missionState.syncRepairRecords(this.repairHistory.exportState());
+    } catch {
+      // Best-effort; retried on the next repair transition.
     }
   }
 
@@ -1123,13 +1287,14 @@ export class MissionOrchestrator {
         label: a.label,
       })),
       affectedFiles: this.extractAffectedFiles(buildDelegation),
+      engine: mission.context?.engine,
     };
   }
 
   private extractAffectedFiles(delegation: Delegation): string[] {
     const files: string[] = [];
     const output = delegation.result ?? "";
-    const filePattern = /\b([\w/.-]+\.(?:ts|js|json|html|css))\b/g;
+    const filePattern = /\b([\w/.-]+\.(?:ts|js|json|html|css|lua|luau))\b/g;
     let match;
     while ((match = filePattern.exec(output)) !== null) {
       files.push(match[1]);
@@ -1230,6 +1395,27 @@ export class MissionOrchestrator {
     let lastError: string | null = null;
     const attemptedModels: string[] = [];
 
+    // Fetch the current delegation from persisted state — this carries any
+    // partial artifacts (result, outputs) from prior failed attempts.
+    // The `delegation` parameter may be a stale copy from the plan object.
+    const currentDelegation = this.config.missionState.getDelegation(delegation.id) ?? delegation;
+
+    // Context handoff: enrich the delegation prompt with a bounded,
+    // role-specific block (blueprint slice + mission memory + artifacts).
+    // The ORIGINAL description (ROLE:/FILE:/BUILD_COMMAND: markers) is
+    // preserved verbatim — handoff is appended, never substituted.
+    const handoffBlock = this.buildHandoffBlock(currentDelegation);
+    const enrichedDelegation = handoffBlock
+      ? { ...currentDelegation, description: `${currentDelegation.description}\n\n${handoffBlock}` }
+      : currentDelegation;
+    if (handoffBlock) {
+      this.publisher.publish({
+        missionId: delegation.missionId,
+        type: "delegation.context.handoff" as any,
+        payload: { delegationId: delegation.id, chars: handoffBlock.length },
+      });
+    }
+
     // Phase 8 Gap 3: Model fallback chain
     const router = this.config.modelRouter;
     const maxFallbackAttempts = this.config.maxModelFallbackAttempts ?? 3;
@@ -1238,7 +1424,7 @@ export class MissionOrchestrator {
     // If modelOverride is provided (e.g., from CHANGE_MODEL recovery), use it directly
     let selectedModel: string | undefined = modelOverride;
     if (!selectedModel && router) {
-      const initialRoute = router.chooseModel({ delegation, role: delegation.role ?? "Developer", mission: this.currentMission! });
+      const initialRoute = router.chooseModel({ delegation: currentDelegation, role: currentDelegation.role ?? "Developer", mission: this.currentMission! });
       selectedModel = initialRoute.primary;
     }
 
@@ -1249,10 +1435,10 @@ export class MissionOrchestrator {
 
     const executeOnce = async (overrideModel?: string): Promise<AgentResult> => {
       try {
-        const adapterResult = await this.config.factoryAdapter.runDelegation(delegation, this.currentMission!, {
+        const adapterResult = await this.config.factoryAdapter.runDelegation(enrichedDelegation, this.currentMission!, {
           baseDir: this.config.baseDir,
           project: this.config.project,
-          fromStep: delegation.stepIds?.[0],
+          fromStep: currentDelegation.stepIds?.[0],
           model: overrideModel ?? selectedModel,
           signal: abortController.signal,
         });
@@ -1297,7 +1483,7 @@ export class MissionOrchestrator {
     // If adapter threw (provider/model failure) and router is configured, retry with fallbacks
     // Only run internal fallback chain if no explicit modelOverride was provided
     if (!modelOverride && router && isModelProviderFailure(agentResult) && agentResult.status === "failed") {
-      const route = router.chooseModel({ delegation, role: delegation.role ?? "Developer", mission: this.currentMission! });
+      const route = router.chooseModel({ delegation: currentDelegation, role: currentDelegation.role ?? "Developer", mission: this.currentMission! });
       let currentModel = route.primary;
       attemptedModels.push(currentModel);
 
@@ -1415,6 +1601,33 @@ export class MissionOrchestrator {
         previousErrors,
       });
 
+      // Repair memory: never blindly re-apply the same repair. On repeat
+      // failures require a different diagnosis; on exhausted budget escalate
+      // to BLOCKED instead of looping forever.
+      if (this.repairHistory) {
+        const decision = this.repairHistory.decide(
+          delegation.id,
+          `${validationResult.command} exit ${validationResult.exitCode}: ${validationResult.stderr.slice(0, 300)}`,
+          `${triage.targetRole}: ${triage.reason}`,
+        );
+        if (decision.action === "blocked") {
+          this.publisher.publish({
+            missionId: delegation.missionId,
+            type: "delegation.escalated" as any,
+            payload: { delegationId: delegation.id, reason: decision.reason },
+          });
+          return false;
+        }
+        if (decision.action === "retry-different" && attempt >= maxAttempts) {
+          this.publisher.publish({
+            missionId: delegation.missionId,
+            type: "delegation.escalated" as any,
+            payload: { delegationId: delegation.id, reason: decision.reason },
+          });
+          return false;
+        }
+      }
+
       // Emit triage decision event
       this.publisher.publish({
         missionId: delegation.missionId,
@@ -1476,12 +1689,30 @@ export class MissionOrchestrator {
 
       if (repairResult.status === "failed") {
         previousErrors.push(repairResult.error || "Agent execution failed");
+        this.repairHistory?.record({
+          delegationId: delegation.id,
+          failure: `${validationResult.command} exit ${validationResult.exitCode}`,
+          evidence: validationResult.stderr.slice(0, 500),
+          diagnosis: triage.reason,
+          repairAttempted: `${triage.targetRole}: ${triage.reason}`,
+          repairResult: "failed",
+        });
+        await this.persistRepairHistory();
         continue;
       }
 
       // Re-run validation
       const revalidation = await this.runValidation(delegation, repairResult);
       if (revalidation.passed) {
+        this.repairHistory?.record({
+          delegationId: delegation.id,
+          failure: `${validationResult.command} exit ${validationResult.exitCode}`,
+          evidence: validationResult.stderr.slice(0, 500),
+          diagnosis: triage.reason,
+          repairAttempted: `${triage.targetRole}: ${triage.reason}`,
+          repairResult: "fixed",
+        });
+        await this.persistRepairHistory();
         return true;
       }
 

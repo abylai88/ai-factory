@@ -538,7 +538,7 @@ describe("progress reporting on resume", () => {
     expect(progress.completed).toBeGreaterThan(0);
   });
 
-  it("getResumeState returns correct completed/failed sets", async () => {
+  it("getResumeState returns correct completed/failed/resumable sets", async () => {
     const mission = makeMission();
     const del1 = createDelegation(mission.id, "obj-1", "Step 1", "desc", "game", { acceptanceCriteria: ["c1"] });
     const del2 = createDelegation(mission.id, "obj-1", "Step 2", "desc", "game", { dependsOn: [del1.id], acceptanceCriteria: ["c2"] });
@@ -567,7 +567,11 @@ describe("progress reporting on resume", () => {
 
     const resumeState = state.getResumeState();
     expect(resumeState.completed.has(del1.id)).toBe(true);
-    expect(resumeState.failed.has(del2.id)).toBe(true);
+    // del2 failed but has no repairs — budget not exhausted → resumable
+    expect(resumeState.resumable.has(del2.id)).toBe(true);
+    expect(resumeState.failed.has(del2.id)).toBe(false);
+    // del3 is queued → resumable
+    expect(resumeState.resumable.has(del3.id)).toBe(true);
     expect(resumeState.completed.has(del3.id)).toBe(false);
     expect(resumeState.failed.has(del3.id)).toBe(false);
   });
@@ -685,5 +689,618 @@ describe("resume preserves delegation state", () => {
     const reloadedRetry = state2.getDelegation(retry.id);
     expect(reloadedRetry?.retryOf).toBe(original.id);
     expect(reloadedRetry?.status).toBe("passed");
+  });
+});
+
+// ─── Reproduction: original failed + 3 repairs failed + downstream resumable ─
+
+describe("reproduction: original failed with exhausted repairs", () => {
+  it("preserves repair history, resumes downstream via partial artifact, skips completed", async () => {
+    const mission = makeMission();
+    // del-0 (research) → del-1 (design / "Technical design") → del-2 (build) → del-3 (test)
+    const del0 = createDelegation(mission.id, "obj-1", "Research", "Research market", "game", {
+      acceptanceCriteria: ["Research done"],
+      role: "Researcher",
+    });
+    const del1 = createDelegation(mission.id, "obj-1", "Technical design", "Create GDD", "game", {
+      dependsOn: [del0.id],
+      acceptanceCriteria: ["GDD created"],
+      role: "Designer",
+    });
+    const del2 = createDelegation(mission.id, "obj-2", "Build", "Implement gameplay", "game", {
+      dependsOn: [del1.id],
+      acceptanceCriteria: ["Gameplay works"],
+      role: "Developer",
+    });
+    const del3 = createDelegation(mission.id, "obj-2", "Test", "Write tests", "game", {
+      dependsOn: [del2.id],
+      acceptanceCriteria: ["Tests pass"],
+      role: "QA",
+    });
+
+    const plan = createExecutionPlan(
+      mission,
+      [
+        { id: "obj-1", title: "Research", description: "Research", delegations: [del0.id, del1.id] },
+        { id: "obj-2", title: "Build", description: "Build", delegations: [del2.id, del3.id] },
+      ],
+      [del0, del1, del2, del3],
+      [],
+      []
+    );
+
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    // Simulate the real scenario:
+    // del-0 passed (research done)
+    await state.completeDelegation(del0.id, "passed", "Market analysis complete");
+    // del-1 failed (technical design failed) with partial artifact
+    await state.completeDelegation(del1.id, "failed", "Partial GDD created", "GDD incomplete");
+    // 3 repair delegations of del-1 all failed by timeout
+    const repair1 = createDelegation(mission.id, "obj-1", "[REPAIR 1/3] Technical design", "Repair GDD", "game", {
+      dependsOn: [],
+      acceptanceCriteria: ["GDD created"],
+      retryOf: del1.id,
+    });
+    const repair2 = createDelegation(mission.id, "obj-1", "[REPAIR 2/3] Technical design", "Repair GDD", "game", {
+      dependsOn: [],
+      acceptanceCriteria: ["GDD created"],
+      retryOf: del1.id,
+    });
+    const repair3 = createDelegation(mission.id, "obj-1", "[REPAIR 3/3] Technical design", "Repair GDD", "game", {
+      dependsOn: [],
+      acceptanceCriteria: ["GDD created"],
+      retryOf: del1.id,
+    });
+    await state.addDelegation(repair1);
+    await state.addDelegation(repair2);
+    await state.addDelegation(repair3);
+    await state.completeDelegation(repair1.id, "failed", "", "Timeout after 30s");
+    await state.completeDelegation(repair2.id, "failed", "", "Timeout after 30s");
+    await state.completeDelegation(repair3.id, "failed", "", "Timeout after 30s");
+    // del-2 and del-3 were never started (blocked by del-1 failure)
+    // They remain "queued" in persisted state
+
+    // Verify persisted state before resume
+    expect(state.getDelegation(del0.id)?.status).toBe("passed");
+    expect(state.getDelegation(del1.id)?.status).toBe("failed");
+    expect(state.getDelegation(repair1.id)?.status).toBe("failed");
+    expect(state.getDelegation(repair2.id)?.status).toBe("failed");
+    expect(state.getDelegation(repair3.id)?.status).toBe("failed");
+    expect(state.getDelegation(del2.id)?.status).toBe("queued");
+    expect(state.getDelegation(del3.id)?.status).toBe("queued");
+
+    // Check budget exhaustion
+    expect(state.isBudgetExhausted(del1.id)).toBe(true);
+    expect(state.getRepairAttemptCount(del1.id)).toBe(3);
+
+    // Check artifact from failed delegation is preserved
+    expect(state.hasDelegationArtifact(del1.id)).toBe(true);
+
+    // Prepare for resume
+    const resumeData = await state.prepareForResume();
+
+    // Verify prepareForResume only reset running→queued (none were running)
+    // and preserved all failure history
+    expect(state.getDelegation(del0.id)?.status).toBe("passed");
+    expect(state.getDelegation(del1.id)?.status).toBe("failed");
+    expect(state.getDelegation(del1.id)?.error).toBe("GDD incomplete");
+    expect(state.getDelegation(repair1.id)?.status).toBe("failed");
+    expect(state.getDelegation(repair2.id)?.status).toBe("failed");
+    expect(state.getDelegation(repair3.id)?.status).toBe("failed");
+
+    // Check resume state categorization
+    const resumeState = state.getResumeState();
+    // del-0 completed (passed) — should be skipped
+    expect(resumeState.completed.has(del0.id)).toBe(true);
+    // del-1 failed with exhausted budget — permanently failed, skipped
+    expect(resumeState.failed.has(del1.id)).toBe(true);
+    // repair delegations — always skipped (retryOf set)
+    expect(resumeState.failed.has(repair1.id)).toBe(true);
+    expect(resumeState.failed.has(repair2.id)).toBe(true);
+    expect(resumeState.failed.has(repair3.id)).toBe(true);
+    // del-2 and del-3 queued — resumable
+    expect(resumeState.resumable.has(del2.id)).toBe(true);
+    expect(resumeState.resumable.has(del3.id)).toBe(true);
+
+    // Run orchestrator on resume
+    const adapter = new RecordingAdapter();
+    const eventSink = new InMemoryEventSink();
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 3,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: adapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state,
+      resume: true,
+    });
+
+    const result = await orchestrator.executeMission(resumeData.mission, resumeData.plan!);
+
+    // Mission completes because del-1 has a partial artifact that satisfies
+    // the design dependency, allowing del-2 and del-3 to resume.
+    expect(result.status).toBe("completed");
+
+    // Verify no duplicate full-pipeline restart:
+    // del-0 should NOT be re-executed (was already passed)
+    expect(adapter.executedDelegations).not.toContain(del0.id);
+    // del-1 should NOT be re-executed (budget exhausted)
+    expect(adapter.executedDelegations).not.toContain(del1.id);
+    // repair delegations should NOT be re-executed
+    expect(adapter.executedDelegations).not.toContain(repair1.id);
+    expect(adapter.executedDelegations).not.toContain(repair2.id);
+    expect(adapter.executedDelegations).not.toContain(repair3.id);
+    // del-2 SHOULD be executed (resumable via partial artifact from del-1)
+    expect(adapter.executedDelegations).toContain(del2.id);
+    // del-3 SHOULD be executed (deps met after del-2 passes)
+    expect(adapter.executedDelegations).toContain(del3.id);
+
+    // Verify progress is from persisted state + new completions
+    const progress = state.getProgress();
+    expect(progress.completed).toBe(3); // del-0 + del-2 + del-3
+    expect(progress.total).toBe(7); // 4 original + 3 repairs
+  });
+});
+
+// ─── Reproduction: original completed, downstream failed ──────────────
+
+describe("reproduction: completed upstream, failed downstream", () => {
+  it("skips completed delegation and retries only the failed downstream", async () => {
+    const mission = makeMission();
+    const del0 = createDelegation(mission.id, "obj-1", "Research", "Research market", "game", {
+      acceptanceCriteria: ["Research done"],
+      role: "Researcher",
+    });
+    const del1 = createDelegation(mission.id, "obj-1", "Design", "Design game", "game", {
+      dependsOn: [del0.id],
+      acceptanceCriteria: ["Design done"],
+      role: "Designer",
+    });
+    const del2 = createDelegation(mission.id, "obj-2", "Build", "Implement gameplay", "game", {
+      dependsOn: [del1.id],
+      acceptanceCriteria: ["Gameplay works"],
+      role: "Developer",
+    });
+
+    const plan = createExecutionPlan(
+      mission,
+      [
+        { id: "obj-1", title: "Research & Design", description: "Phase 1", delegations: [del0.id, del1.id] },
+        { id: "obj-2", title: "Build", description: "Phase 2", delegations: [del2.id] },
+      ],
+      [del0, del1, del2],
+      [],
+      []
+    );
+
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    // del-0 completed, del-1 completed, del-2 failed (no repair attempts)
+    await state.completeDelegation(del0.id, "passed", "Research done");
+    await state.completeDelegation(del1.id, "passed", "Design done");
+    await state.completeDelegation(del2.id, "failed", "", "Build crashed");
+
+    // Budget NOT exhausted — del-2 has no repairs
+    expect(state.isBudgetExhausted(del2.id)).toBe(false);
+
+    // Resume
+    const resumeData = await state.prepareForResume();
+    const resumeState = state.getResumeState();
+
+    // del-0 and del-1 should be skipped
+    expect(resumeState.completed.has(del0.id)).toBe(true);
+    expect(resumeState.completed.has(del1.id)).toBe(true);
+    // del-2 should be resumable (failed, budget not exhausted)
+    expect(resumeState.resumable.has(del2.id)).toBe(true);
+    expect(resumeState.failed.has(del2.id)).toBe(false);
+
+    const adapter = new RecordingAdapter();
+    const eventSink = new InMemoryEventSink();
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 3,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: adapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state,
+      resume: true,
+    });
+
+    const result = await orchestrator.executeMission(resumeData.mission, resumeData.plan!);
+    expect(result.status).toBe("completed");
+
+    // del-0 and del-1 should NOT be re-executed
+    expect(adapter.executedDelegations).not.toContain(del0.id);
+    expect(adapter.executedDelegations).not.toContain(del1.id);
+    // del-2 should be retried
+    expect(adapter.executedDelegations).toContain(del2.id);
+  });
+});
+
+// ─── Reproduction: partial artifact preserved across resume ───────────
+
+describe("reproduction: partial artifact survives resume", () => {
+  it("detects partial artifact on failed delegation and preserves it through resume", async () => {
+    const mission = makeMission();
+    const del0 = createDelegation(mission.id, "obj-1", "Research", "Research market", "game", {
+      acceptanceCriteria: ["Research done"],
+      role: "Researcher",
+    });
+    const del1 = createDelegation(mission.id, "obj-1", "Design", "Create GDD", "game", {
+      dependsOn: [del0.id],
+      acceptanceCriteria: ["GDD created"],
+      role: "Designer",
+    });
+
+    const plan = createExecutionPlan(
+      mission,
+      [{ id: "obj-1", title: "Phase 1", description: "Phase 1", delegations: [del0.id, del1.id] }],
+      [del0, del1],
+      [],
+      []
+    );
+
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    // del-0 completed, del-1 failed with partial artifact
+    await state.completeDelegation(del0.id, "passed", "Research complete");
+    const partialOutput = "Created GDD.md with sections: Gameplay, Art Style, Sound. Missing: monetization, analytics.";
+    await state.completeDelegation(del1.id, "failed", partialOutput, "Incomplete GDD");
+
+    // Verify partial artifact is detectable
+    expect(state.hasDelegationArtifact(del1.id)).toBe(true);
+    expect(state.getDelegation(del1.id)?.result).toBe(partialOutput);
+
+    // Simulate process restart — reload from disk
+    const state2 = new MissionState(tmpDir, mission.id);
+    await state2.init();
+
+    // Artifact survives restart
+    expect(state2.hasDelegationArtifact(del1.id)).toBe(true);
+    expect(state2.getDelegation(del1.id)?.result).toBe(partialOutput);
+    expect(state2.getDelegation(del1.id)?.status).toBe("failed");
+
+    // Prepare for resume
+    const resumeData = await state2.prepareForResume();
+
+    // Artifact is still there after prepareForResume
+    expect(state2.hasDelegationArtifact(del1.id)).toBe(true);
+    expect(state2.getDelegation(del1.id)?.result).toBe(partialOutput);
+
+    // Run orchestrator — adapter should receive delegation with partial artifact
+    const adapter = new RecordingAdapter();
+    const eventSink = new InMemoryEventSink();
+    let receivedDelegation: Delegation | null = null;
+
+    const spyAdapter: FactoryExecutionAdapter = {
+      async runDelegation(delegation: Delegation, _mission: Mission, _config: { baseDir: string; project: string }) {
+        receivedDelegation = delegation;
+        return {
+          delegationId: delegation.id,
+          status: "passed",
+          output: "GDD created successfully with all required sections including gameplay design, art style, and sound design documented",
+          durationMs: 10,
+        };
+      },
+    };
+
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 3,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: spyAdapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state2,
+      resume: true,
+    });
+
+    const result = await orchestrator.executeMission(resumeData.mission, resumeData.plan!);
+    expect(result.status).toBe("completed");
+
+    // del-0 was already passed — skipped
+    expect(adapter.executedDelegations).not.toContain(del0.id);
+
+    // del-1 was retried — verify it received the partial artifact
+    expect(receivedDelegation).not.toBeNull();
+    expect(receivedDelegation!.id).toBe(del1.id);
+    expect(receivedDelegation!.result).toBe(partialOutput);
+
+    // After successful retry, artifact is updated
+    const finalDel = state2.getDelegation(del1.id);
+    expect(finalDel?.status).toBe("passed");
+    expect(finalDel?.result).toContain("GDD created successfully");
+  });
+});
+
+// ─── Regression: exhausted upstream + no usable artifact => blocked ──────
+
+describe("exhausted upstream with no artifact", () => {
+  it("blocks downstream with explicit reason when upstream has no partial artifact", async () => {
+    const mission = makeMission();
+    const del0 = createDelegation(mission.id, "obj-1", "Research", "Research market", "game", {
+      acceptanceCriteria: ["Research done"],
+      role: "Researcher",
+    });
+    const del1 = createDelegation(mission.id, "obj-1", "Design", "Create GDD", "game", {
+      dependsOn: [del0.id],
+      acceptanceCriteria: ["GDD created"],
+      role: "Designer",
+    });
+    const del2 = createDelegation(mission.id, "obj-2", "Build", "Implement gameplay", "game", {
+      dependsOn: [del1.id],
+      acceptanceCriteria: ["Gameplay works"],
+      role: "Developer",
+    });
+
+    const plan = createExecutionPlan(
+      mission,
+      [
+        { id: "obj-1", title: "Research", description: "Research", delegations: [del0.id, del1.id] },
+        { id: "obj-2", title: "Build", description: "Build", delegations: [del2.id] },
+      ],
+      [del0, del1, del2],
+      [],
+      []
+    );
+
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    // del-0 passed, del-1 failed with NO artifact (empty result)
+    await state.completeDelegation(del0.id, "passed", "Research done");
+    await state.completeDelegation(del1.id, "failed", "", "Design failed completely");
+
+    // 3 repairs all failed
+    for (let i = 1; i <= 3; i++) {
+      const repair = createDelegation(mission.id, "obj-1", `[REPAIR ${i}/3] Design`, "Repair design", "game", {
+        dependsOn: [],
+        acceptanceCriteria: ["GDD created"],
+        retryOf: del1.id,
+      });
+      await state.addDelegation(repair);
+      await state.completeDelegation(repair.id, "failed", "", "Timeout");
+    }
+
+    // Verify no artifact on del-1
+    expect(state.hasDelegationArtifact(del1.id)).toBe(false);
+    expect(state.isBudgetExhausted(del1.id)).toBe(true);
+
+    const resumeData = await state.prepareForResume();
+    const adapter = new RecordingAdapter();
+    const eventSink = new InMemoryEventSink();
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 3,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: adapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state,
+      resume: true,
+    });
+
+    const result = await orchestrator.executeMission(resumeData.mission, resumeData.plan!);
+
+    // Mission fails because del-1 has no artifact and del-2 cannot proceed
+    expect(result.status).toBe("failed");
+
+    // del-0 NOT re-executed
+    expect(adapter.executedDelegations).not.toContain(del0.id);
+    // del-1 NOT re-executed (exhausted)
+    expect(adapter.executedDelegations).not.toContain(del1.id);
+    // del-2 NOT executed (blocked — no artifact from del-1)
+    expect(adapter.executedDelegations).not.toContain(del2.id);
+
+    // del-2 should be blocked with explicit reason
+    const del2State = state.getDelegation(del2.id);
+    expect(del2State?.status).toBe("blocked");
+    expect(del2State?.error).toBe("Upstream dependency failed with no usable artifact");
+  });
+});
+
+// ─── Regression: exhausted upstream + artifact + downstream resumes ──────
+
+describe("exhausted upstream with artifact allows downstream resume", () => {
+  it("downstream becomes resumable when exhausted upstream has partial artifact", async () => {
+    const mission = makeMission();
+    const del0 = createDelegation(mission.id, "obj-1", "Research", "Research market", "game", {
+      acceptanceCriteria: ["Research done"],
+      role: "Researcher",
+    });
+    const del1 = createDelegation(mission.id, "obj-1", "Design", "Create GDD", "game", {
+      dependsOn: [del0.id],
+      acceptanceCriteria: ["GDD created"],
+      role: "Designer",
+    });
+    const del2 = createDelegation(mission.id, "obj-2", "Build", "Implement gameplay", "game", {
+      dependsOn: [del1.id],
+      acceptanceCriteria: ["Gameplay works"],
+      role: "Developer",
+    });
+
+    const plan = createExecutionPlan(
+      mission,
+      [
+        { id: "obj-1", title: "Research", description: "Research", delegations: [del0.id, del1.id] },
+        { id: "obj-2", title: "Build", description: "Build", delegations: [del2.id] },
+      ],
+      [del0, del1, del2],
+      [],
+      []
+    );
+
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    // del-0 passed, del-1 failed WITH partial artifact
+    await state.completeDelegation(del0.id, "passed", "Research done");
+    await state.completeDelegation(del1.id, "failed", "Partial GDD created with gameplay section", "Missing monetization");
+
+    // 3 repairs all failed
+    for (let i = 1; i <= 3; i++) {
+      const repair = createDelegation(mission.id, "obj-1", `[REPAIR ${i}/3] Design`, "Repair design", "game", {
+        dependsOn: [],
+        acceptanceCriteria: ["GDD created"],
+        retryOf: del1.id,
+      });
+      await state.addDelegation(repair);
+      await state.completeDelegation(repair.id, "failed", "", "Timeout");
+    }
+
+    // Verify artifact exists on del-1
+    expect(state.hasDelegationArtifact(del1.id)).toBe(true);
+    expect(state.isBudgetExhausted(del1.id)).toBe(true);
+
+    const resumeData = await state.prepareForResume();
+    const adapter = new RecordingAdapter();
+    const eventSink = new InMemoryEventSink();
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 3,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: adapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state,
+      resume: true,
+    });
+
+    const result = await orchestrator.executeMission(resumeData.mission, resumeData.plan!);
+
+    // Mission completes — del-2 can proceed using del-1's partial artifact
+    expect(result.status).toBe("completed");
+
+    // del-0 NOT re-executed
+    expect(adapter.executedDelegations).not.toContain(del0.id);
+    // del-1 NOT re-executed (exhausted)
+    expect(adapter.executedDelegations).not.toContain(del1.id);
+    // del-2 SHOULD be executed (resumable via artifact)
+    expect(adapter.executedDelegations).toContain(del2.id);
+  });
+});
+
+// ─── Regression: partial artifact from failed upstream passed to downstream ─
+
+describe("partial artifact passed to downstream worker", () => {
+  it("downstream worker receives delegation with partial artifact from exhausted upstream", async () => {
+    const mission = makeMission();
+    const del0 = createDelegation(mission.id, "obj-1", "Research", "Research market", "game", {
+      acceptanceCriteria: ["Research done"],
+      role: "Researcher",
+    });
+    const del1 = createDelegation(mission.id, "obj-1", "Design", "Create GDD", "game", {
+      dependsOn: [del0.id],
+      acceptanceCriteria: ["GDD created"],
+      role: "Designer",
+    });
+    const del2 = createDelegation(mission.id, "obj-2", "Build", "Implement gameplay", "game", {
+      dependsOn: [del1.id],
+      acceptanceCriteria: ["Gameplay works"],
+      role: "Developer",
+    });
+
+    const plan = createExecutionPlan(
+      mission,
+      [
+        { id: "obj-1", title: "Research", description: "Research", delegations: [del0.id, del1.id] },
+        { id: "obj-2", title: "Build", description: "Build", delegations: [del2.id] },
+      ],
+      [del0, del1, del2],
+      [],
+      []
+    );
+
+    const state = new MissionState(tmpDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    await state.setPlan(plan);
+    for (const del of plan.delegations) {
+      await state.addDelegation(del);
+    }
+
+    const partialOutput = "GDD.md created with gameplay, art style, and sound sections. Monetization section incomplete.";
+    await state.completeDelegation(del0.id, "passed", "Research done");
+    await state.completeDelegation(del1.id, "failed", partialOutput, "GDD incomplete");
+
+    // 3 repairs all failed
+    for (let i = 1; i <= 3; i++) {
+      const repair = createDelegation(mission.id, "obj-1", `[REPAIR ${i}/3] Design`, "Repair design", "game", {
+        dependsOn: [],
+        acceptanceCriteria: ["GDD created"],
+        retryOf: del1.id,
+      });
+      await state.addDelegation(repair);
+      await state.completeDelegation(repair.id, "failed", "", "Timeout");
+    }
+
+    const resumeData = await state.prepareForResume();
+
+    // Spy adapter that captures what the downstream worker receives
+    let receivedDelegation: Delegation | null = null;
+    const spyAdapter: FactoryExecutionAdapter = {
+      async runDelegation(delegation: Delegation, _mission: Mission, _config: { baseDir: string; project: string }) {
+        receivedDelegation = delegation;
+        return {
+          delegationId: delegation.id,
+          status: "passed",
+          output: "Gameplay implemented based on GDD",
+          durationMs: 10,
+        };
+      },
+    };
+
+    const eventSink = new InMemoryEventSink();
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 3,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "projects", "test"),
+      factoryAdapter: spyAdapter,
+      auditor: new DeterministicAuditor(),
+      eventSink,
+      missionState: state,
+      resume: true,
+    });
+
+    const result = await orchestrator.executeMission(resumeData.mission, resumeData.plan!);
+    expect(result.status).toBe("completed");
+
+    // Verify downstream worker received the delegation with the partial artifact
+    expect(receivedDelegation).not.toBeNull();
+    expect(receivedDelegation!.id).toBe(del2.id);
+    // The delegation object should carry the partial artifact from the exhausted upstream
+    // (the downstream worker can use it to inform its implementation)
+    expect(receivedDelegation!.dependsOn).toContain(del1.id);
   });
 });

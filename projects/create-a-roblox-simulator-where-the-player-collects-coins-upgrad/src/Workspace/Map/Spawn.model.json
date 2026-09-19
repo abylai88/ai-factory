@@ -1,0 +1,16 @@
+{
+  "ClassName": "SpawnLocation",
+  "Properties": {
+    "Name": "Spawn",
+    "Size": [6, 1, 6],
+    "Position": [0, 0.5, 0],
+    "Anchored": true,
+    "CanCollide": true,
+    "Material": "Plastic",
+    "Color": [0.6, 0.6, 0.6],
+    "TopSurface": "Smooth",
+    "BottomSurface": "Smooth",
+    "Neutral": true,
+    "Duration": 0
+  }
+}

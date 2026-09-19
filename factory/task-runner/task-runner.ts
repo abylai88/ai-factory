@@ -1,4 +1,5 @@
 import * as pty from "node-pty";
+import path from "node:path";
 import { TaskManager, Task } from "../task-manager/task-manager.js";
 import {
   chooseModel,
@@ -8,15 +9,61 @@ import {
   classifyError,
   isRetryableError
 } from "../model-router/router.js";
+import {
+  ensureProjectDependencies,
+  envWithLocalBin,
+} from "../setup/project-bootstrap.js";
+import { deployProjectConfig } from "../setup/project-setup.js";
+import { isRobloxProjectDir } from "../roblox/platform.js";
+import {
+  ensureProjectReady,
+  type EnsureProjectReadyOptions,
+  type EnsureProjectReadyResult,
+} from "../roblox/project-ready.js";
 
 export interface RunnerConfig {
   baseDir: string;
   maxAttempts?: number;
   attemptTimeoutMs?: number;
+  /** Explicit timeout used for every Roblox attempt (overrides role map). */
+  robloxTimeoutMs?: number;
   project?: string;
+  /**
+   * Provision the Roblox place artifact + ensure Studio readiness before
+   * agent attempts (default true). Set false (or AI_FACTORY_ENSURE_STUDIO=0)
+   * for pure source tasks that must not touch Studio.
+   */
+  ensureStudio?: boolean;
+  /** Injectable readiness hook (unit tests stub this; production uses ensureProjectReady). */
+  projectReadyFn?: (projectDir: string, opts?: EnsureProjectReadyOptions) => Promise<EnsureProjectReadyResult>;
 }
 
 export const DEFAULT_ATTEMPT_TIMEOUT_MS = 120_000;
+
+/**
+ * Roblox attempts routinely exceed the generic browser/npm budgets: a real
+ * Playtest cycle (open Studio → play → settle → runtime assertions →
+ * screenshot → repair) plus Luau authoring can exceed 10 minutes. These
+ * budgets default higher and are overridable per-run via
+ * `AI_FACTORY_ROBLOX_TIMEOUT_MS` (or RunnerConfig.robloxTimeoutMs).
+ */
+export const ROBLOX_ATTEMPT_TIMEOUT_MS = 1_200_000;
+
+/** Roles that can legitimately run a full Roblox Playtest/repair cycle. */
+export const ROBLOX_ROLE_TIMEOUTS_MS: Record<string, number> = {
+  programmer: 1_200_000,
+  builder: 1_200_000,
+  qa: 1_200_000,
+  tester: 1_200_000,
+  gameplay: 1_200_000,
+  visual: 1_200_000,
+  ui: 1_200_000,
+  game: 1_200_000,
+  engineering: 1_200_000,
+  content: 1_200_000,
+  architect: 900_000,
+  director: 900_000,
+};
 
 export const ROLE_TIMEOUTS_MS: Record<string, number> = {
   research: 180_000,
@@ -27,7 +74,7 @@ export const ROLE_TIMEOUTS_MS: Record<string, number> = {
   qa: 300_000,
   reviewer: 240_000,
   market: 180_000,
-  competitor: 180_000,
+  competitor: 120_000,
   idea: 180_000,
   director: 300_000,
   gameplay: 240_000,
@@ -35,6 +82,9 @@ export const ROLE_TIMEOUTS_MS: Record<string, number> = {
   monetization: 180_000,
   architect: 300_000
 };
+
+/** Platform used to pick the timeout budget for an attempt. */
+export type AttemptPlatform = "roblox" | "web";
 
 const GRACEFUL_SHUTDOWN_MS = 5_000;
 // Cap output at 10MB to prevent memory exhaustion from runaway agent output
@@ -44,7 +94,11 @@ export class TaskRunner {
   private readonly manager: TaskManager;
   private readonly maxAttempts: number;
   private readonly explicitTimeoutMs: number | undefined;
+  private readonly robloxTimeoutMs: number;
   private readonly project: string;
+  private readonly baseDir: string;
+  private readonly ensureStudio: boolean;
+  private readonly projectReadyFn: (projectDir: string, opts?: EnsureProjectReadyOptions) => Promise<EnsureProjectReadyResult>;
 
   constructor(config: RunnerConfig) {
     if (!config.project && !process.env.AI_FACTORY_PROJECT) {
@@ -54,23 +108,98 @@ export class TaskRunner {
       );
     }
 
+    this.baseDir = config.baseDir ?? process.cwd();
     this.project =
-      config.project ??
-      process.env.AI_FACTORY_PROJECT!;
+      config.project ?? process.env.AI_FACTORY_PROJECT!;
     this.manager = new TaskManager(config.baseDir, this.project);
     this.maxAttempts = config.maxAttempts ?? 3;
     this.explicitTimeoutMs = config.attemptTimeoutMs;
+    this.ensureStudio =
+      config.ensureStudio ?? process.env.AI_FACTORY_ENSURE_STUDIO !== "0";
+    this.projectReadyFn = config.projectReadyFn ?? ensureProjectReady;
+    const envRoblox = Number(process.env.AI_FACTORY_ROBLOX_TIMEOUT_MS);
+    this.robloxTimeoutMs =
+      config.robloxTimeoutMs ??
+      (Number.isFinite(envRoblox) && envRoblox > 0 ? envRoblox : ROBLOX_ATTEMPT_TIMEOUT_MS);
   }
 
   async init(): Promise<void> {
     await this.manager.init();
   }
 
-  getTimeoutForRole(role: string): number {
+  /**
+   * Timeout for one attempt. When `platform` is "roblox" the taller Roblox
+   * budget is used so a real Playtest cycle is never killed mid-flight.
+   */
+  getTimeoutForRole(role: string, platform?: AttemptPlatform): number {
     if (this.explicitTimeoutMs !== undefined) {
       return this.explicitTimeoutMs;
     }
+    if (platform === "roblox") {
+      return ROBLOX_ROLE_TIMEOUTS_MS[role] ?? this.robloxTimeoutMs;
+    }
     return ROLE_TIMEOUTS_MS[role] ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
+  }
+
+  /**
+   * Detect the target platform from disk. Presence of a Rojo
+   * `default.project.json` is the unambiguous Roblox marker; anything else
+   * keeps the historical web/npm budgets. Detection never throws — an
+   * unreadable dir falls back to "web".
+   */
+  async detectPlatform(project: string = this.project): Promise<AttemptPlatform> {
+    try {
+      if (await isRobloxProjectDir(project)) return "roblox";
+    } catch {
+      // fall through to web
+    }
+    return "web";
+  }
+
+  /**
+   * Roblox readiness gate: validate → Rojo artifact → Studio PLACE_READY.
+   * Runs BEFORE any model attempt so infrastructure failures never consume
+   * model rotation or enter code-repair loops. Web projects and
+   * ensureStudio=false skip entirely (returned as skipped, never a call).
+   */
+  async ensureRobloxReadiness(
+    project: string = this.project
+  ): Promise<
+    | { ok: true; skipped: true }
+    | { ok: true; skipped?: false; result: EnsureProjectReadyResult }
+    | { ok: false; error: string; result: EnsureProjectReadyResult }
+  > {
+    if (!this.ensureStudio) {
+      return { ok: true, skipped: true };
+    }
+    if ((await this.detectPlatform(project)) !== "roblox") {
+      return { ok: true, skipped: true };
+    }
+    const started = Date.now();
+    let result: EnsureProjectReadyResult;
+    try {
+      result = await this.projectReadyFn(project, { projectDir: project });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.log(`\nTASK BLOCKED (infrastructure): Roblox readiness threw: ${message}`);
+      return {
+        ok: false,
+        error: `roblox_toolchain: project readiness threw after ${Date.now() - started}ms: ${message}`,
+        result: { ok: false, code: "PROJECT_NOT_READY", reason: message },
+      };
+    }
+    if (result.ok) {
+      const state = result.state;
+      const artifact = result.artifact;
+      console.log(
+        `\n[ROBLOX-READY] ${state} in ${Date.now() - started}ms ` +
+          `(artifact: ${artifact.artifactPath}, ${artifact.sizeBytes} bytes${artifact.rebuilt ? ", rebuilt" : ", reused"}` +
+          `${result.load ? `, load: ${result.load.message}` : ""})`
+      );
+      return { ok: true, result };
+    }
+    console.log(`\nTASK BLOCKED (infrastructure): ${result.reason}`);
+    return { ok: false, error: result.reason, result };
   }
 
   private runOpenCode(
@@ -103,6 +232,8 @@ export class TaskRunner {
       console.log("TIMEOUT:", timeoutMs, "ms");
       console.log("========================================\n");
 
+      const openCodeConfig = project + "/opencode.json";
+
       const child = pty.spawn(
         "/home/asila/.opencode/bin/opencode",
         [
@@ -121,7 +252,14 @@ export class TaskRunner {
           env: {
             ...process.env,
             HOME: "/home/asila",
-            PATH: `/home/asila/.opencode/bin:${process.env.PATH ?? ""}`
+            // Enable the project's opencode.json config so the child process
+            // discovers the robloxstudio MCP server definition (which references
+            // {file:~/.robloxstudio-mcp/auth-token} — resolved at runtime from
+            // the user's home directory, never hardcoded or emitted as a secret).
+            OPENCODE_CONFIG: openCodeConfig,
+            // Resolve build tools (webpack, tsc) from the PROJECT's own
+            // node_modules first — never silently rely on global installs.
+            PATH: `/home/asila/.opencode/bin:${envWithLocalBin(project).PATH ?? process.env.PATH ?? ""}`,
           }
         }
       );
@@ -226,7 +364,10 @@ export class TaskRunner {
       game: "designer",
       engineering: "builder",
       programmer: "programmer",
-      qa: "tester",
+      qa: "qa",
+      tester: "tester",
+      visual: "visual",
+      ui: "ui",
       reviewer: "reviewer",
       market: "market",
       competitor: "competitor",
@@ -298,7 +439,9 @@ export class TaskRunner {
     console.log("ROLE:", task.role);
     console.log("PROJECT:", project);
 
-    const timeoutMs = this.getTimeoutForRole(task.role);
+    const platform = await this.detectPlatform(project);
+    const timeoutMs = this.getTimeoutForRole(task.role, platform);
+    console.log("PLATFORM:", platform);
     console.log("TIMEOUT:", timeoutMs, "ms");
 
     await this.manager.updateTask(task.id, {
@@ -307,19 +450,64 @@ export class TaskRunner {
       error: undefined
     });
 
+    // Lightweight dependency preflight BEFORE any agent attempt: verify the
+    // project has node_modules + required local binaries, recovering
+    // deterministically (npm ci / npm install) when needed. A bootstrap
+    // failure is infrastructure — report it directly WITHOUT consuming model
+    // rotation attempts or sending it into agent repair loops.
+    const bootstrap = await ensureProjectDependencies(project);
+    if (!bootstrap.ok) {
+      await this.manager.updateTask(task.id, {
+        status: "failed",
+        error: bootstrap.error,
+      });
+      console.log(`\nTASK BLOCKED (infrastructure): ${bootstrap.error}`);
+      return this.manager.getTask(task.id)!;
+    }
+    if (bootstrap.installed) {
+      console.log(
+        `\n[BOOTSTRAP] Recovered project dependencies (${bootstrap.strategy}), retrying task normally.`
+      );
+    }
+
+    // Synchronize the Factory root robloxstudio MCP into the project's
+    // opencode.json so that child OpenCode processes launched via TaskRunner
+    // can connect to the robloxstudio MCP bridge. This runs for both new
+    // (scaffolded) and existing workspaces, non-destructively preserving
+    // project-specific settings like small_model and disabled_providers.
+    await deployProjectConfig(project, path.join(this.baseDir, "opencode.json"));
+
+    // Roblox readiness gate: provision the .rbxlx artifact and ensure Studio
+    // is loaded and ready BEFORE any model attempt. Infrastructure failures
+    // are reported directly WITHOUT consuming model rotation attempts.
+    // Web projects and ensureStudio=false skip inside ensureRobloxReadiness.
+    {
+      const readiness = await this.ensureRobloxReadiness(project);
+      if (!readiness.ok) {
+        await this.manager.updateTask(task.id, {
+          status: "failed",
+          error: readiness.error,
+        });
+        return this.manager.getTask(task.id)!;
+      }
+    }
+
     const failedModels: string[] = [];
     const attemptHistory: AttemptResult[] = [];
     let lastAttemptResult: AttemptResult | null = null;
 
+    // If a model is pre-selected, seed failedModels so chooseModel picks the next one on retry
+    if (task.model) {
+      failedModels.push(task.model);
+    }
+
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       console.log(`\nATTEMPT ${attempt}/${this.maxAttempts}`);
 
-      const choice = task.model
-        ? { model: task.model, reason: `Using pre-selected model ${task.model}` }
-        : chooseModel(
-          task.role as AgentRole,
-          failedModels
-        );
+      const choice = chooseModel(
+        task.role as AgentRole,
+        failedModels
+      );
 
       const prompt = `
 You are an autonomous AI Factory agent.
@@ -336,14 +524,14 @@ ${task.description}
 PROJECT:
 ${project}
 
-RULES:
-1. Inspect the project first.
-2. Work only on this task.
-3. Do not make unrelated changes.
-4. If changes are required, implement them.
-5. Verify your work.
-6. Report exactly what you changed.
-7. Report tests/build status.
+INSTRUCTIONS:
+1. Work in the PROJECT directory: ${project}
+2. Read existing project files before making changes.
+3. Follow the step-by-step workflow for your role.
+4. Produce a concrete artifact or code changes.
+5. Verify your work (build, typecheck, or file existence).
+6. Stop after producing the artifact. Do not loop endlessly.
+7. Report exactly what you did and the result.
 `;
 
       const taskAgent = task.agent ?? this.agentForRole(task.role);

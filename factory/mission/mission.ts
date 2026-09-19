@@ -125,6 +125,8 @@ export const DiagnosisInputSchema = z.object({
     label: z.string(),
   })),
   affectedFiles: z.array(z.string()),
+  /** Target engine ("web" | "roblox"). Roblox skips Visual QA verification. */
+  engine: z.string().optional(),
 });
 export type DiagnosisInput = z.infer<typeof DiagnosisInputSchema>;
 
@@ -218,6 +220,8 @@ export const MissionSchema = z.object({
   diagnosisRepairPlan: DiagnosisRepairPlanSchema.optional(),
   repairCycleCount: z.number().int().nonnegative().default(0),
   repairExecutionResult: z.any().optional(),
+  /** Structured Production Blueprint (created before implementation). */
+  blueprint: z.any().optional(),
 });
 export type Mission = z.infer<typeof MissionSchema>;
 
@@ -343,9 +347,15 @@ export const MissionEventSchema = z.object({
     "mission.planned",
     "mission.approved",
     "mission.started",
+    "mission.stage",
+    "mission.blueprint.created",
+    "mission.blocked",
+    "mission.passed",
     "delegation.created",
     "delegation.started",
     "delegation.completed",
+    "delegation.context.handoff",
+    "tool.called",
     "mission.auditing",
     "mission.audit.passed",
     "mission.audit.failed",
@@ -375,6 +385,11 @@ export const MissionEventSchema = z.object({
     "delegation.recovery.failed",
     "delegation.escalated",
     "mission.resumed",
+    // Persisted memory events (artifact/decision/repair/readiness records)
+    "mission.artifact.registered",
+    "mission.decision.recorded",
+    "mission.repair.recorded",
+    "mission.readiness.recorded",
   ]),
   payload: z.record(z.string(), z.unknown()),
 });

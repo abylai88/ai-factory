@@ -1,0 +1,14 @@
+{
+  "ClassName": "Part",
+  "Properties": {
+    "Name": "Baseplate",
+    "Size": [120, 2, 120],
+    "Position": [0, -1, 0],
+    "Anchored": true,
+    "CanCollide": true,
+    "Material": "Grass",
+    "Color": [0.31, 0.64, 0.21],
+    "TopSurface": "Smooth",
+    "BottomSurface": "Smooth"
+  }
+}

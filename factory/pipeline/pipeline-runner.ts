@@ -3,6 +3,12 @@ import { TaskRunner } from "../task-runner/task-runner.js";
 import { Task } from "../task-manager/task-manager.js";
 import { TaskContext } from "../context/task-context.js";
 import {
+  ensureProjectDependencies,
+  isDependencyBootstrapFailure,
+} from "../setup/project-bootstrap.js";
+import { isRobloxProjectDir } from "../roblox/platform.js";
+import { isRojoMissingFailure } from "../roblox/rojo.js";
+import {
   Pipeline,
   PipelineStep,
   PipelineType,
@@ -70,8 +76,11 @@ function outputIndicatesFailure(output: string): boolean {
   return false;
 }
 
-function isInfrastructureFailure(error?: string | null): boolean {
+export function isInfrastructureFailure(error?: string | null): boolean {
   if (!error) return false;
+  if (isDependencyBootstrapFailure(error)) return true;
+  // Missing Rojo toolchain is infrastructure, never a game-code bug.
+  if (isRojoMissingFailure(error)) return true;
   const lower = error.toLowerCase();
   return (
     lower.startsWith("timeout:") ||
@@ -81,6 +90,22 @@ function isInfrastructureFailure(error?: string | null): boolean {
     lower.includes("no payment method") ||
     lower.startsWith("payment_error:")
   );
+}
+
+/**
+ * Steps that execute code, tests, or builds need a bootstrapped project
+ * (node_modules + local webpack/tsc). Research/design/review steps only read
+ * files and are exempt from the preflight.
+ */
+const PREFLIGHT_STEP_IDS = new Set(["implementation", "test", "build"]);
+const PREFLIGHT_ROLES = new Set(["engineering", "programmer", "qa"]);
+const PREFLIGHT_AGENTS = new Set(["builder", "programmer", "tester"]);
+
+export function needsBootstrapPreflight(step: PipelineStep): boolean {
+  if (PREFLIGHT_STEP_IDS.has(step.id)) return true;
+  if (PREFLIGHT_ROLES.has((step.role ?? "").toLowerCase())) return true;
+  if (PREFLIGHT_AGENTS.has((step.agent ?? "").toLowerCase())) return true;
+  return false;
 }
 
 export class RealExecutor implements StepExecutor {
@@ -455,6 +480,38 @@ IMPORTANT:
         `\n▶ STEP ${index + 1}/${total}: ${step.title}`
       );
       console.log(`🤖 AGENT: ${step.agent}`);
+
+      // Dependency preflight for implementation/test/build steps (real
+      // executions only): recover node_modules + local binaries
+      // deterministically, then run the actual step. A bootstrap failure
+      // blocks the pipeline as infrastructure — it NEVER enters the
+      // TEST→BUGFIX→TEST repair loop or an architect cascade.
+      // Roblox/Rojo projects skip the npm bootstrap entirely: they have no
+      // package.json lifecycle and Rojo validation owns their health checks.
+      if (needsBootstrapPreflight(step) && this.isRealExecutor()) {
+        if (await isRobloxProjectDir(this.project)) {
+          console.log(
+            `[ROBLOX] Skipping npm bootstrap for Rojo project at step "${step.id}".`
+          );
+        } else {
+          const bootstrap = await ensureProjectDependencies(this.project);
+          if (!bootstrap.ok) {
+            const reason = bootstrap.error ?? "dependency bootstrap failed";
+            console.log(`\n🛑 PIPELINE BLOCKED AT: ${step.id} (infrastructure failure)`);
+            console.log(`STATUS: blocked`);
+            await context.addError(
+              `Infrastructure failure at step "${step.id}": ${reason}`,
+              step.id
+            );
+            return { status: "failed", output: reason.slice(0, 4000) };
+          }
+          if (bootstrap.installed) {
+            console.log(
+              `[BOOTSTRAP] Recovered project dependencies (${bootstrap.strategy}) — retrying step "${step.id}" normally.`
+            );
+          }
+        }
+      }
 
       const result = await this.executor.execute(
         stepTask,
