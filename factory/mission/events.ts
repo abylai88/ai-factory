@@ -108,4 +108,8 @@ export const MissionEventTypes = {
   DELEGATION_RECOVERY_FAILED: "delegation.recovery.failed",
   DELEGATION_ESCALATED: "delegation.escalated",
   MISSION_RESUMED: "mission.resumed",
+  // Production quality stage (explicit mission stage: review → repair → gate)
+  MISSION_QUALITY_STAGE: "mission.quality.stage",
+  MISSION_QUALITY_REPAIR: "mission.quality.repair",
+  MISSION_QUALITY_GATE: "mission.quality.gate",
 } as const;

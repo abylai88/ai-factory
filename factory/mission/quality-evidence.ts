@@ -17,6 +17,8 @@ import { scrubEphemeralIds } from "./readiness-evidence.js";
 
 export interface RobloxQualityInputs {
   sceneSummary?: string;
+  /** Bounded StarterGui/UI inventory summary (see factory/roblox/ui-evidence.ts). */
+  uiInventory?: string;
   readiness?: EnsureProjectReadyResult | null;
   playtest?: ManagedPlaytestResult | null;
   screenshotRef?: string;
@@ -88,6 +90,7 @@ export function buildRobloxQualityEvidence(input: RobloxQualityInputs): RobloxQu
   const sources: string[] = [];
   if (input.validationOutput?.trim()) sources.push(`validation: ${scrubEphemeralIds(input.validationOutput).slice(0, 800)}`);
   if (input.runtimeLogs?.trim()) sources.push(`runtime logs: ${scrubEphemeralIds(input.runtimeLogs).slice(0, 800)}`);
+  if (input.uiInventory?.trim()) sources.push(`UI hierarchy: ${scrubEphemeralIds(input.uiInventory).slice(0, 800)}`);
 
   let runtimeSummary: string | undefined;
   if (input.playtest) {

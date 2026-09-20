@@ -33,6 +33,17 @@ import type { MissionPlanner } from "./mission-planner.js";
 import { deriveBlueprintFromGoal, blueprintSliceForRole } from "./blueprint.js";
 import { buildDirectorVision, renderDirectorVision } from "./director-vision.js";
 import { RepairHistory } from "./repair-history.js";
+import { runProductionQualityStage, reviewDimensionEvidence } from "./quality-stage.js";
+import type { QualityStageCallbacks } from "./quality-stage.js";
+import type { QualityRepairTask } from "./quality-gate.js";
+import { buildQualityCriticEvidence } from "./quality-context.js";
+import { deriveQualityContract } from "./quality-contract.js";
+import { captureQualityScreenshot, screenshotRefForCritic, type QualityScreenshotBridge } from "../roblox/quality-screenshot.js";
+import { collectStarterGuiEvidence, type UiEvidenceBridge } from "../roblox/ui-evidence.js";
+import { scrubEphemeralIds } from "./readiness-evidence.js";
+import { coreRoleForSpecialist, isSpecialistRole } from "./specialist-roles.js";
+import { buildRoleHandoff, qualityBriefForRole } from "./context-handoff.js";
+import type { FunctionalInputs } from "./quality-gate.js";
 import { PeerReviewSystem, defaultReviewExecutor, type ReviewExecutor, type ReviewRequest, type ReviewResult } from "./peer-review.js";
 import { ArtifactStore, type MissionArtifact } from "./artifact-store.js";
 import type { MissionSupervisor } from "./mission-supervisor.js";
@@ -46,6 +57,20 @@ export interface FactoryExecutionAdapter {
 
 export interface Auditor {
   audit(delegation: Delegation, result: AgentResult, mission: Mission, plan: ExecutionPlan): Promise<AuditResult>;
+}
+
+export interface ProductionQualityStageConfig {
+  /** Set false to skip the stage (default true when the config is present). */
+  enabled?: boolean;
+  /** Reused single Studio bridge for read-only evidence (never launched). */
+  bridge?: QualityScreenshotBridge & UiEvidenceBridge;
+  maxRounds?: number;
+  repairBudget?: number;
+  /** Override derived functional/runtime inputs (tests, callers). */
+  functional?: Partial<FunctionalInputs>;
+  /** Full overrides for tests (offline deterministic review/repair). */
+  review?: QualityStageCallbacks["review"];
+  repairOne?: QualityStageCallbacks["repairOne"];
 }
 
 export interface OrchestratorConfig {
@@ -75,6 +100,10 @@ export interface OrchestratorConfig {
   maxMissionDurationMs?: number;
   // Resume mode: skip startMission, use persisted state
   resume?: boolean;
+  // Production quality stage: explicit post-implementation review →
+  // targeted repair → re-review → production gate. Runs automatically
+  // after the delegation graph succeeds when present (and enabled).
+  qualityStage?: ProductionQualityStageConfig;
 }
 
 const DEFAULT_MAX_REPAIRS = 3;
@@ -123,6 +152,7 @@ export class MissionOrchestrator {
       maxMissionDurationMs: config.maxMissionDurationMs,
       supervisor: config.supervisor,
       resume: config.resume,
+      qualityStage: config.qualityStage,
     };
 
     // Fail fast if peer review is enabled but no review executor is provided
@@ -316,6 +346,25 @@ export class MissionOrchestrator {
           await this.config.missionState.completeMission("failed");
           this.currentMission = { ...this.currentMission!, status: "failed" };
           return this.currentMission;
+        }
+
+        // Production quality stage (explicit mission stage): runs
+        // automatically after implementation + functional validation when
+        // configured. FUNCTIONAL_PASS → QUALITY_REVIEW → QUALITY_REPAIR
+        // → QUALITY_REVIEW → PRODUCTION_QUALITY_PASS. Completion requires
+        // the production gate — unavailable evidence never silently passes.
+        if (this.config.qualityStage && this.config.qualityStage.enabled !== false) {
+          const qualityOutcome = await this.runProductionQualityStage();
+          if (!this.isRunning) {
+            await this.config.missionState.completeMission("failed");
+            this.currentMission = { ...this.currentMission!, status: "failed" };
+            return this.currentMission;
+          }
+          if (!qualityOutcome) {
+            await this.config.missionState.completeMission("failed");
+            this.currentMission = { ...this.currentMission!, status: "failed" };
+            return this.currentMission;
+          }
         }
 
         await this.config.missionState.completeMission("completed");
@@ -1756,6 +1805,204 @@ export class MissionOrchestrator {
       createdAt: new Date().toISOString(),
       retryOf: original.id,
     };
+  }
+
+  // ─── Production quality stage ─────────────────────────────
+  // Explicit post-implementation mission stage reusing the existing
+  // quality system (contract, critics, guardrails, triage, RepairHistory,
+  // gate) + real Roblox evidence (readiness, bounded scene/UI reads,
+  // screenshot). Read-only live reads reuse the single connected Studio;
+  // nothing here launches, restarts, or leaves a playtest running.
+
+  private async runProductionQualityStage(): Promise<boolean> {
+    const cfg = this.config.qualityStage!;
+    const mission = this.currentMission!;
+    const blueprint = (mission as unknown as { blueprint?: Parameters<typeof deriveQualityContract>[0] }).blueprint;
+    const contract = blueprint ? deriveQualityContract(blueprint) : undefined;
+
+    let directorVisionText = "";
+    try {
+      const designDecisions = this.config.missionState.getDecisions("design");
+      directorVisionText = designDecisions[0]?.detail ?? "";
+      if (!directorVisionText && blueprint) {
+        directorVisionText = renderDirectorVision(buildDirectorVision(blueprint)).slice(0, 2000);
+      }
+    } catch {
+      // Vision is best-effort context.
+    }
+
+    // Functional inputs: the delegation graph already succeeded, so
+    // functional evidence is the graph outcome + implementation artifacts.
+    // Runtime evidence comes from persisted readiness / visual-QA state;
+    // when absent, runtime stays honestly FAIL (never invented).
+    const delegations = this.config.missionState.getDelegations();
+    const passedCount = delegations.filter((d) => d.status === "passed").length;
+    const readiness = this.config.missionState.getReadinessEvidence();
+    const visualQa = this.config.missionState.getVisualQaResult();
+    const functional: FunctionalInputs = {
+      functionalPass: true,
+      functionalEvidence: `delegation graph passed (${passedCount}/${delegations.length}); implementation artifacts registered`,
+      runtimePass: Boolean(readiness && !readiness.needsRevalidation),
+      runtimeEvidence: readiness?.evidence ?? visualQa?.errors?.join("; ") ?? "",
+      ...cfg.functional,
+    };
+
+    const review = cfg.review ?? (async (round: number) => this.collectQualityReview(round, contract, directorVisionText));
+    const repairOne = cfg.repairOne ?? (async (task: QualityRepairTask, finding) => this.executeQualityRepair(task, finding));
+
+    const outcome = await runProductionQualityStage(
+      { review, repairOne },
+      {
+        contract,
+        functional,
+        maxRounds: cfg.maxRounds ?? 3,
+        repairBudget: cfg.repairBudget ?? this.config.maxRepairs ?? 3,
+        missionId: mission.id,
+        missionState: this.config.missionState,
+        eventSink: this.config.eventSink,
+      },
+    );
+    this.currentMission = this.config.missionState.getMission();
+    return outcome.gate.productionPass;
+  }
+
+  /** Default round-aware review: state evidence + bounded live reads. */
+  private async collectQualityReview(
+    round: number,
+    contract: ReturnType<typeof deriveQualityContract> | undefined,
+    directorVisionText: string,
+  ) {
+    const mission = this.currentMission!;
+    const blueprint = (mission as unknown as { blueprint?: import("./blueprint.js").ProductionBlueprint }).blueprint;
+    const bridge = this.config.qualityStage?.bridge;
+
+    // Persisted state evidence (summaries only, never raw transcripts).
+    const readiness = this.config.missionState.getReadinessEvidence();
+    const visualQa = this.config.missionState.getVisualQaResult();
+    const artifactSummaries = (this.artifactStore?.getArtifactsForMission() ?? [])
+      .slice(0, 10)
+      .map((a) => `- ${a.title}${a.path ? ` (${a.path})` : ""}: ${a.summary.slice(0, 160)}`);
+    const priorFindings = this.config.missionState.getQualityFindings().map(
+      (f) => `- ${f.id} [${f.dimension}/${f.severity}/${f.status}]: ${f.why.slice(0, 160)}`,
+    );
+    const repairNotes = this.config.missionState.getRepairRecords().map(
+      (r) => `- ${r.delegationId}: ${r.diagnosis.slice(0, 120)} → ${r.repairResult}`,
+    );
+
+    // Bounded live reads (read-only; each degrades to unavailable).
+    let sceneSummary: string | undefined;
+    let screenshotRef: string | undefined;
+    let uiInventory: string | undefined;
+    if (bridge) {
+      try {
+        const structure = await bridge.callTool("get_project_structure", {
+          path: "game.Workspace",
+          maxDepth: 2,
+        });
+        if (structure.ok) {
+          sceneSummary = scrubEphemeralIds(structure.stdout ?? JSON.stringify(structure.data ?? ""))
+            .slice(0, 1500);
+        }
+      } catch {
+        // Scene evidence stays unavailable.
+      }
+      try {
+        const shot = await captureQualityScreenshot(bridge, {
+          project: this.config.project,
+          missionId: mission.id,
+          stage: round === 0 ? "quality-review" : `quality-re-review-${round}`,
+          contextLabel: "production quality review viewport",
+        });
+        screenshotRef = screenshotRefForCritic(shot);
+      } catch {
+        // Screenshot stays unavailable (never fabricated).
+      }
+      try {
+        const ui = await collectStarterGuiEvidence(bridge);
+        if (ui.status === "captured") uiInventory = ui.uiInventory;
+      } catch {
+        // UI evidence stays unavailable.
+      }
+    }
+
+    const runtimeSummary = [
+      readiness ? `readiness: ${readiness.evidence}` : "",
+      visualQa ? `visual-qa: ${visualQa.status} (${visualQa.checks} checks)` : "",
+    ]
+      .filter(Boolean)
+      .join("; ")
+      .slice(0, 1500) || undefined;
+
+    const per = buildQualityCriticEvidence({
+      blueprint,
+      directorVisionText,
+      contract,
+      artifactSummaries,
+      sceneSummary,
+      uiInventory,
+      runtimeSummary,
+      assertionSummary: visualQa ? `visual-qa:${visualQa.status}` : undefined,
+      qaSummary: readiness ? readiness.evidence.slice(0, 500) : undefined,
+      screenshotRef,
+      previousFindings: priorFindings.slice(0, 6),
+      repairHistoryNotes: repairNotes.slice(0, 6),
+    });
+    return reviewDimensionEvidence(per, contract);
+  }
+
+  /** Targeted specialist repair for one quality finding (never "polish the game"). */
+  private async executeQualityRepair(
+    task: QualityRepairTask,
+    finding: import("./quality-critics.js").QualityFinding,
+  ): Promise<{ fixed: boolean; note: string }> {
+    if (!this.isRunning) return { fixed: false, note: "mission stopped; repair skipped" };
+    const specialist = task.specialist ?? finding.proposedOwner;
+    const coreRole = isSpecialistRole(specialist) ? coreRoleForSpecialist(specialist) : "Developer";
+    const brief = qualityBriefForRole(specialist);
+    const handoff = buildRoleHandoff({
+      role: specialist,
+      taskTitle: `[Quality repair] ${finding.violatedRequirement}: ${task.objective}`,
+      directorQuality: undefined,
+      qualityRequirements: brief.qualityRequirements,
+      qualityFindings: [
+        `${finding.id} [${finding.dimension}/${finding.severity}]: ${finding.why} Evidence: ${finding.evidence.slice(0, 300)}`,
+      ],
+      deliverables: [task.objective],
+      antiPatterns: brief.antiPatterns,
+      verificationRequirements: [task.verification, ...brief.verificationRequirements],
+    });
+    const repairDelegation: Delegation = {
+      id: `quality-repair-${randomUUID().slice(0, 8)}`,
+      missionId: this.currentMission!.id,
+      objectiveId: "obj-quality",
+      title: `[Quality Repair:${specialist}] ${finding.violatedRequirement}`,
+      description: `ROLE: ${coreRole.toLowerCase()}\n\nTARGETED QUALITY REPAIR (owning specialist: ${specialist}). Fix ONLY the finding below; do not redefine game direction.\n\n${handoff}`,
+      pipelineType: "engineering",
+      dependsOn: [],
+      parallelizable: false,
+      acceptanceCriteria: [task.objective.slice(0, 300), task.verification.slice(0, 300)],
+      status: "queued",
+      createdAt: new Date().toISOString(),
+      role: coreRole,
+    };
+    try {
+      await this.config.missionState.addDelegation(repairDelegation);
+    } catch {
+      return { fixed: false, note: "could not register repair delegation" };
+    }
+    const result = await this.executeDelegation(repairDelegation);
+    if (result.status === "passed") {
+      try {
+        await this.config.missionState.updateQualityFinding(finding.id, {
+          repairDelegationId: repairDelegation.id,
+          verificationOutcome: `repair executed; pending re-review verification`,
+        });
+      } catch {
+        // Linkage is best-effort.
+      }
+      return { fixed: true, note: `repair delegation ${repairDelegation.id} passed; pending re-review` };
+    }
+    return { fixed: false, note: result.error?.slice(0, 300) ?? "repair delegation failed" };
   }
 
   private async runVisualQa(buildDelegation: Delegation): Promise<void> {

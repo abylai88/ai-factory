@@ -190,14 +190,38 @@ class McpClient {
     if (!rc) {
       return { ok: false, isError: true, message: `mcp ${tool} returned an empty result (HTTP ${res.status})` };
     }
-    const content0 = rc.content?.[0];
+    const contents = rc.content ?? [];
+    const content0 = contents[0];
     const text =
       typeof content0?.text === "string"
         ? content0.text
         : content0?.data
           ? `[image] ${content0.mimeType ?? ""} ${(content0.data as string).length} chars`
           : "";
-    const structured = rc.structuredContent ?? parseJson(text);
+    let structured: unknown = rc.structuredContent ?? parseJson(text);
+    // Preserve a real MCP image payload (e.g. capture_screenshot returning
+    // image content alongside structured metadata) so downstream evidence
+    // can treat actual pixels as a real artifact. Never synthesized: only
+    // attached when the MCP response literally carries image bytes.
+    const imageEntry = contents.find(
+      (c) =>
+        typeof c?.data === "string" &&
+        c.data.length > 0 &&
+        (c.type === "image" || (typeof c.mimeType === "string" && c.mimeType.startsWith("image/"))),
+    );
+    if (imageEntry?.data) {
+      const base: Record<string, unknown> =
+        structured && typeof structured === "object" && !Array.isArray(structured)
+          ? { ...(structured as Record<string, unknown>) }
+          : {};
+      if (typeof base.imageBase64 !== "string" || !base.imageBase64) {
+        base.imageBase64 = imageEntry.data as string;
+      }
+      if (typeof base.mimeType !== "string" || !base.mimeType) {
+        base.mimeType = imageEntry.mimeType ?? "image/png";
+      }
+      structured = base;
+    }
     const isError = rc.isError === true;
     if (isError) {
       const errObj = (structured ?? parseJson(text)) as Record<string, unknown> | null;

@@ -99,6 +99,31 @@ export type QualityFindingRecord = z.infer<typeof QualityFindingRecordSchema>;
 
 export const MAX_QUALITY_FINDINGS = 100;
 
+// ── Quality stage status (persistent explicit stage) ───────────────
+// The production quality stage (review → repair → re-review → gate) is
+// an explicit mission stage. Only the status summary persists here —
+// findings persist as QualityFindingRecords, repair links on the
+// finding records, verification outcomes on the finding records.
+
+export const QualityStageStatusSchema = z.enum([
+  "not-started",
+  "reviewing",
+  "repairing",
+  "re-reviewing",
+  "passed",
+  "blocked",
+]);
+export type QualityStageStatus = z.infer<typeof QualityStageStatusSchema>;
+
+export const QualityStageRecordSchema = z.object({
+  status: QualityStageStatusSchema,
+  rounds: z.number().int().nonnegative(),
+  summary: z.string().max(1000),
+  productionPass: z.boolean(),
+  updatedAt: z.string(),
+});
+export type QualityStageRecord = z.infer<typeof QualityStageRecordSchema>;
+
 // ── Secret sanitization ──────────────────────────────────────
 
 const SECRET_KEY_PATTERN = /token|secret|credential|password|passwd|apikey|api_key|api-key|auth|bearer|private_key|privatekey/i;
@@ -175,6 +200,7 @@ export function migrateSnapshot(parsed: unknown): MigrationResult {
         supervisorDecisions: Array.isArray(data.supervisorDecisions) ? data.supervisorDecisions : [],
         escalationEvents: Array.isArray(data.escalationEvents) ? data.escalationEvents : [],
         qualityFindings: Array.isArray(data.qualityFindings) ? data.qualityFindings : [],
+        qualityStage: null,
       },
       migratedFrom: 0,
       degraded: false,
@@ -201,6 +227,11 @@ export function migrateSnapshot(parsed: unknown): MigrationResult {
       degraded = true;
       notes.push(`v1 snapshot missing "${field}": defaulted to empty.`);
     }
+  }
+  if (data.qualityStage === undefined) {
+    data.qualityStage = null;
+    degraded = true;
+    notes.push(`v1 snapshot missing "qualityStage": defaulted to null.`);
   }
   return { data, migratedFrom: rawVersion, degraded, notes };
 }

@@ -31,6 +31,7 @@ import {
   MAX_DECISIONS,
   MAX_QUALITY_FINDINGS,
   QualityFindingRecordSchema,
+  QualityStageRecordSchema,
   ReadinessEvidenceSchema,
   migrateSnapshot,
   sanitizeForPersistence,
@@ -38,6 +39,8 @@ import {
   type DecisionRecord,
   type DecisionCategory,
   type QualityFindingRecord,
+  type QualityStageRecord,
+  type QualityStageStatus,
   type ReadinessEvidence,
 } from "./persisted-memory.js";
 import { MissionArtifactSchema, type MissionArtifact } from "./artifact-store.js";
@@ -81,6 +84,8 @@ export interface MissionSnapshot {
   readinessEvidence: ReadinessEvidence | null;
   /** Persisted quality findings (critic findings + verification outcomes). */
   qualityFindings: QualityFindingRecord[];
+  /** Persisted production quality stage status (explicit mission stage). */
+  qualityStage: QualityStageRecord | null;
   updatedAt: string;
 }
 
@@ -131,6 +136,7 @@ const SNAPSHOT_SCHEMA = z.object({
   })).optional(),
   readinessEvidence: ReadinessEvidenceSchema.nullable().optional(),
   qualityFindings: z.array(QualityFindingRecordSchema).optional(),
+  qualityStage: QualityStageRecordSchema.nullable().optional(),
   updatedAt: z.string(),
 });
 
@@ -179,6 +185,7 @@ export class MissionState {
   private supervisorDecisions: SupervisorDecisionRecord[] = [];
   private escalationEvents: EscalationEventRecord[] = [];
   private qualityFindings: QualityFindingRecord[] = [];
+  private qualityStage: QualityStageRecord | null = null;
 
   constructor(baseDir: string, missionId: string, options?: { disableLock?: boolean }) {
     const sanitized = sanitizeMissionId(missionId);
@@ -287,6 +294,7 @@ export class MissionState {
     this.escalationEvents = validated.escalationEvents ?? [];
     this.readinessEvidence = validated.readinessEvidence ?? null;
     this.qualityFindings = validated.qualityFindings ?? [];
+    this.qualityStage = validated.qualityStage ?? null;
   }
 
   private async loadFromSnapshot(): Promise<void> {
@@ -563,6 +571,15 @@ export class MissionState {
           }
         }
         break;
+
+      case "mission.quality.stage":
+        if (payload.qualityStage) {
+          const parsed = QualityStageRecordSchema.safeParse(payload.qualityStage);
+          if (parsed.success) {
+            this.qualityStage = parsed.data;
+          }
+        }
+        break;
     }
 
     this.mission.updatedAt = new Date().toISOString();
@@ -631,6 +648,7 @@ export class MissionState {
         ? (sanitizeForPersistence(this.readinessEvidence) as ReadinessEvidence)
         : null,
       qualityFindings: sanitizeForPersistence(this.qualityFindings) as QualityFindingRecord[],
+      qualityStage: this.qualityStage,
       updatedAt: new Date().toISOString(),
     };
 
@@ -887,6 +905,38 @@ export class MissionState {
       missionId: this.missionId,
       type: "mission.quality.updated",
       payload: { qualityFinding: parsed },
+    });
+    return parsed;
+  }
+
+  // ── Production quality stage: explicit mission stage ──
+  // Status/rounds/summary persist here; findings persist as
+  // QualityFindingRecords (with repair links + verification outcomes).
+  // Survives restarts so resume keeps quality history.
+
+  getQualityStage(): QualityStageRecord | null {
+    return this.qualityStage ? { ...this.qualityStage } : null;
+  }
+
+  async recordQualityStage(input: {
+    status: QualityStageStatus;
+    rounds: number;
+    summary: string;
+    productionPass: boolean;
+  }): Promise<QualityStageRecord> {
+    const record: QualityStageRecord = {
+      status: input.status,
+      rounds: Math.max(0, input.rounds),
+      summary: input.summary.slice(0, 1000),
+      productionPass: input.productionPass,
+      updatedAt: new Date().toISOString(),
+    };
+    const parsed = QualityStageRecordSchema.parse(record);
+    this.qualityStage = parsed;
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.quality.stage" as never,
+      payload: { qualityStage: parsed },
     });
     return parsed;
   }
