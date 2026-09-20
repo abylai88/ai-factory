@@ -244,6 +244,41 @@ describe("deduplication", () => {
   });
 });
 
+describe("ephemeral runtime identifiers are never persisted", () => {
+  it("scrubs Studio instance IDs from project-ready load messages", async () => {
+    const missionId = nextMissionId();
+    const state = await openState(missionId);
+    const result = makeProjectReadyResult();
+    // Live loader message shape: "Reused existing Studio (instance:xyz)"
+    (result as any).load.message = "Reused existing Studio (instance:tyf-pbr)";
+    await recordProjectReadyEvidence(state, "/tmp/project", result);
+    const evidence = state.getReadinessEvidence();
+    expect(evidence!.evidence).toContain("PLACE_READY");
+    expect(evidence!.evidence).toContain("instance:[redacted]");
+    expect(evidence!.evidence).not.toContain("instance:tyf-pbr");
+
+    const raw = await fs.readFile(
+      path.join(tmpDir, "outputs", "missions", `${missionId}.state.json`),
+      "utf8",
+    );
+    expect(raw).not.toContain("instance:tyf-pbr");
+  });
+
+  it("scrubs peer/launch handles from playtest infra reasons", async () => {
+    const state = await openState(nextMissionId());
+    const result = makePlaytestResult({
+      status: "BLOCKED",
+      infraReason: "could not start: peer:tw0-epy wedged after launch:abc-123 on instance:srv-server",
+    });
+    await recordPlaytestEvidence(state, "/tmp/project", result);
+    const evidence = state.getReadinessEvidence();
+    expect(evidence!.evidence).toContain("playtest BLOCKED");
+    expect(evidence!.evidence).not.toContain("peer:tw0-epy");
+    expect(evidence!.evidence).not.toContain("launch:abc-123");
+    expect(evidence!.evidence).not.toContain("instance:srv-server");
+  });
+});
+
 describe("Hermes summary secret-free", () => {
   it("missionSummaryToHermesStatus does not expose secrets or ephemeral IDs", async () => {
     const state = await openState(nextMissionId());

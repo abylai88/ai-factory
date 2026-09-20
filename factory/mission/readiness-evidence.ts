@@ -7,8 +7,25 @@ import type { ManagedPlaytestResult } from "../studio/playtest-lifecycle.js";
  * onto the existing MissionState recordReadinessEvidence() API.
  *
  * Never persists secrets, ephemeral Studio peer IDs, live handles,
- * PIDs, or raw transcripts — the MissionState sanitizer handles that.
+ * PIDs, or raw transcripts. The MissionState sanitizer strips
+ * secret-looking KEYS, but lifecycle messages embed ephemeral runtime
+ * identifiers (e.g. "Reused existing Studio (instance:abc)") inside
+ * free-text VALUES — so this adapter scrubs those out of the evidence
+ * summary before recording.
  */
+
+/**
+ * Redact ephemeral Studio runtime identifiers from a free-text summary.
+ * Observed live formats: `instance:<id>`, `peer:<id>`, `launch:<id>`.
+ * Readability is preserved ("instance:[redacted]") while the concrete
+ * handle — meaningless after a restart — never reaches the snapshot/JSONL.
+ */
+export function scrubEphemeralIds(text: string): string {
+  return text
+    .replace(/\binstance:[A-Za-z0-9_-]+/g, "instance:[redacted]")
+    .replace(/\bpeer:[A-Za-z0-9_-]+/g, "peer:[redacted]")
+    .replace(/\blaunch:[A-Za-z0-9_-]+/g, "launch:[redacted]");
+}
 
 export async function recordProjectReadyEvidence(
   missionState: MissionState,
@@ -30,7 +47,7 @@ export async function recordProjectReadyEvidence(
     projectDir,
     artifactPath: artifact.artifactPath,
     artifactFresh: artifact.rebuilt,
-    evidence: parts.join("; ").slice(0, 1000),
+    evidence: scrubEphemeralIds(parts.join("; ")).slice(0, 1000),
   });
 }
 
@@ -51,6 +68,6 @@ export async function recordPlaytestEvidence(
   if (result.infraReason) parts.push(`infra: ${result.infraReason.slice(0, 200)}`);
   await missionState.recordReadinessEvidence({
     projectDir,
-    evidence: parts.join("; ").slice(0, 1000),
+    evidence: scrubEphemeralIds(parts.join("; ")).slice(0, 1000),
   });
 }
