@@ -5,6 +5,9 @@ import {
   AgentResult,
 } from "./mission.js";
 import { runGoal } from "../pipeline/pipeline-runner.js";
+import type { EnsureProjectReadyResult } from "../roblox/project-ready.js";
+import { recordProjectReadyEvidence } from "./readiness-evidence.js";
+import { MissionState } from "./state.js";
 import { ProjectProvisioner, ProjectHandle } from "./project-provisioner.js";
 import { ensureProjectDependencies } from "../setup/project-bootstrap.js";
 import { isRobloxProjectDir } from "../roblox/platform.js";
@@ -94,6 +97,7 @@ export class MissionProjectManager {
 export interface MissionAwareAdapterConfig {
   baseDir: string;
   projectManager: MissionProjectManager;
+  missionState?: MissionState;
 }
 
 import { FactoryExecutionAdapter } from "./orchestrator.js";
@@ -104,7 +108,8 @@ export class MissionAwareFactoryAdapter implements FactoryExecutionAdapter {
 
   constructor(config: MissionAwareAdapterConfig, innerAdapter?: InnerFactoryAdapter) {
     this.config = config;
-    this.innerAdapter = innerAdapter ?? new DefaultInnerFactoryAdapter();
+    const ms = (config as MissionAwareAdapterConfig & { missionState?: MissionState }).missionState;
+    this.innerAdapter = innerAdapter ?? new DefaultInnerFactoryAdapter(ms);
   }
 
   async runDelegation(
@@ -168,6 +173,12 @@ export interface InnerFactoryAdapter {
  * Default inner adapter — calls the real runGoal() pipeline.
  */
 export class DefaultInnerFactoryAdapter implements InnerFactoryAdapter {
+  private readonly missionState: MissionState | undefined;
+
+  constructor(missionState?: MissionState) {
+    this.missionState = missionState;
+  }
+
   async runDelegation(
     delegation: Delegation,
     mission: Mission,
@@ -186,6 +197,13 @@ export class DefaultInnerFactoryAdapter implements InnerFactoryAdapter {
         workspace: mission.context?.workspace,
         model: config.model,
         signal: config.signal,
+        onReadinessEvidence: this.missionState
+          ? async (result: EnsureProjectReadyResult) => {
+              if (result.ok) {
+                await recordProjectReadyEvidence(this.missionState!, config.project, result);
+              }
+            }
+          : undefined,
       }
     );
 

@@ -17,6 +17,8 @@ import {
 } from "./mission.js";
 import { normalizeVisualQaEvidence } from "./visual-qa-evidence.js";
 import { MissionState } from "./state.js";
+import type { EnsureProjectReadyResult } from "../roblox/project-ready.js";
+import { recordProjectReadyEvidence } from "./readiness-evidence.js";
 import { MissionEventSink } from "./mission.js";
 import type { ModelRouter } from "./model-router.js";
 import { MissionEventPublisher, createMissionEventPublisher, MissionEventTypes } from "./events.js";
@@ -2414,6 +2416,12 @@ export class DeterministicAuditor implements Auditor {
 }
 
 export class RealFactoryAdapter implements FactoryExecutionAdapter {
+  private readonly missionState: MissionState | undefined;
+
+  constructor(missionState?: MissionState) {
+    this.missionState = missionState;
+  }
+
   async runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }): Promise<AgentResult> {
     const goalResult = await runGoal(
       delegation.description,
@@ -2428,6 +2436,13 @@ export class RealFactoryAdapter implements FactoryExecutionAdapter {
         workspace: mission.context?.workspace,
         model: config.model,
         signal: config.signal,
+        onReadinessEvidence: this.missionState
+          ? async (result: EnsureProjectReadyResult) => {
+              if (result.ok) {
+                await recordProjectReadyEvidence(this.missionState!, config.project, result);
+              }
+            }
+          : undefined,
       }
     );
     return {

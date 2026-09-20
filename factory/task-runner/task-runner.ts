@@ -20,6 +20,7 @@ import {
   type EnsureProjectReadyOptions,
   type EnsureProjectReadyResult,
 } from "../roblox/project-ready.js";
+export type { EnsureProjectReadyResult };
 
 export interface RunnerConfig {
   baseDir: string;
@@ -36,6 +37,8 @@ export interface RunnerConfig {
   ensureStudio?: boolean;
   /** Injectable readiness hook (unit tests stub this; production uses ensureProjectReady). */
   projectReadyFn?: (projectDir: string, opts?: EnsureProjectReadyOptions) => Promise<EnsureProjectReadyResult>;
+  /** Optional callback invoked after ensureProjectReady succeeds, for recording readiness evidence. */
+  onReadinessEvidence?: (result: EnsureProjectReadyResult) => void;
 }
 
 export const DEFAULT_ATTEMPT_TIMEOUT_MS = 120_000;
@@ -99,6 +102,7 @@ export class TaskRunner {
   private readonly baseDir: string;
   private readonly ensureStudio: boolean;
   private readonly projectReadyFn: (projectDir: string, opts?: EnsureProjectReadyOptions) => Promise<EnsureProjectReadyResult>;
+  private readonly onReadinessEvidence?: (result: EnsureProjectReadyResult) => void;
 
   constructor(config: RunnerConfig) {
     if (!config.project && !process.env.AI_FACTORY_PROJECT) {
@@ -117,6 +121,7 @@ export class TaskRunner {
     this.ensureStudio =
       config.ensureStudio ?? process.env.AI_FACTORY_ENSURE_STUDIO !== "0";
     this.projectReadyFn = config.projectReadyFn ?? ensureProjectReady;
+    this.onReadinessEvidence = config.onReadinessEvidence;
     const envRoblox = Number(process.env.AI_FACTORY_ROBLOX_TIMEOUT_MS);
     this.robloxTimeoutMs =
       config.robloxTimeoutMs ??
@@ -196,6 +201,9 @@ export class TaskRunner {
           `(artifact: ${artifact.artifactPath}, ${artifact.sizeBytes} bytes${artifact.rebuilt ? ", rebuilt" : ", reused"}` +
           `${result.load ? `, load: ${result.load.message}` : ""})`
       );
+      if (this.onReadinessEvidence) {
+        try { this.onReadinessEvidence(result); } catch { /* evidence recording must not fail the readiness gate */ }
+      }
       return { ok: true, result };
     }
     console.log(`\nTASK BLOCKED (infrastructure): ${result.reason}`);

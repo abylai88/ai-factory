@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { EnsureProjectReadyResult } from "../task-runner/task-runner.js";
 import { TaskRunner } from "../task-runner/task-runner.js";
 import { Task } from "../task-manager/task-manager.js";
 import { TaskContext } from "../context/task-context.js";
@@ -48,6 +49,8 @@ export interface PipelineRunnerConfig {
   fromStep?: string;
   model?: string;
   signal?: AbortSignal;
+  /** Optional callback invoked after ensureProjectReady succeeds, for recording readiness evidence. */
+  onReadinessEvidence?: (result: EnsureProjectReadyResult) => void;
 }
 
 function isTestStep(step: PipelineStep): boolean {
@@ -111,8 +114,8 @@ export function needsBootstrapPreflight(step: PipelineStep): boolean {
 export class RealExecutor implements StepExecutor {
   private runner: TaskRunner;
 
-  constructor(baseDir: string, project: string) {
-    this.runner = new TaskRunner({ baseDir, project, maxAttempts: 3 });
+  constructor(baseDir: string, project: string, onReadinessEvidence?: (result: EnsureProjectReadyResult) => void) {
+    this.runner = new TaskRunner({ baseDir, project, maxAttempts: 3, onReadinessEvidence });
   }
 
   async init(): Promise<void> {
@@ -144,6 +147,7 @@ export class PipelineRunner {
   private readonly baseDir: string;
   private readonly project: string;
   private readonly maxFixIterations: number;
+  private readonly onReadinessEvidence?: (result: EnsureProjectReadyResult) => void;
   private readonly fromStep?: string;
   private readonly model?: string;
   private readonly signal?: AbortSignal;
@@ -157,12 +161,13 @@ export class PipelineRunner {
   constructor(config: PipelineRunnerConfig) {
     this.baseDir = config.baseDir;
     this.project = config.project;
+    this.onReadinessEvidence = config.onReadinessEvidence;
     this.maxFixIterations = config.maxFixIterations ?? MAX_FIX_ITERATIONS;
     this.fromStep = config.fromStep;
     this.model = config.model;
     this.signal = config.signal;
     this.executor =
-      config.executor ?? new RealExecutor(config.baseDir, config.project);
+      config.executor ?? new RealExecutor(config.baseDir, config.project, this.onReadinessEvidence);
     this.setup = {
       engine: config.engine,
       stack: config.stack,
@@ -634,6 +639,7 @@ export async function runGoal(
     fromStep?: string;
     model?: string;
     signal?: AbortSignal;
+    onReadinessEvidence?: (result: EnsureProjectReadyResult) => void;
   }
 ): Promise<GoalResult> {
   const pipelineId = randomUUID().slice(0, 8);
@@ -645,6 +651,7 @@ export async function runGoal(
     baseDir,
     project,
     executor: opts?.executor,
+    onReadinessEvidence: opts?.onReadinessEvidence,
     maxFixIterations: opts?.maxFixIterations ?? MAX_FIX_ITERATIONS,
     engine: opts?.engine,
     stack: opts?.stack,

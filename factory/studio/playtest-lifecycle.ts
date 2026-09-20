@@ -272,6 +272,8 @@ export interface ManagedPlaytestOptions {
   config?: Partial<PlaytestLifecycleConfig>;
   role?: string;
   projectDir?: string;
+  /** Optional callback invoked after playtest completes, for recording readiness evidence. */
+  onPlaytestEvidence?: (result: ManagedPlaytestResult) => void;
 }
 
 export interface ManagedPlaytestResult {
@@ -613,7 +615,7 @@ export async function runManagedPlaytest(
   const evidence = started.evidence;
   if (!started.ok) {
     // Teardown already attempted in safeStart on the failed paths.
-    return {
+    const managedResult: ManagedPlaytestResult = {
       status: started.blocked ? "BLOCKED" : "FAIL",
       message: started.message,
       state: started.state,
@@ -623,6 +625,10 @@ export async function runManagedPlaytest(
       output: "",
       ...(started.blocked ? { infraReason: started.message } : {}),
     };
+    if (opts.onPlaytestEvidence) {
+      try { opts.onPlaytestEvidence(managedResult); } catch { /* evidence recording must not fail the playtest */ }
+    }
+    return managedResult;
   }
 
   try {
@@ -665,7 +671,7 @@ export async function runManagedPlaytest(
         ? `playtest FAIL: ${failed.map((f) => `${f.name} — ${f.message}`).join("; ").slice(0, 600)}`
         : "playtest PASS";
     notifyLifecycle(role, projectDir, failed.length > 0 ? "FAIL" : "PASS", evidence, Date.now() - start);
-    return {
+    const managedResult: ManagedPlaytestResult = {
       status: failed.length > 0 ? "FAIL" : "PASS",
       message,
       state: "RUNNING",
@@ -675,6 +681,10 @@ export async function runManagedPlaytest(
       output,
       screenshot,
     };
+    if (opts.onPlaytestEvidence) {
+      try { opts.onPlaytestEvidence(managedResult); } catch { /* evidence recording must not fail the playtest */ }
+    }
+    return managedResult;
   } finally {
     if (opts.leaveRunning !== true) {
       const stopped = await safeStopPlaytest(ops, { role, projectDir, config: opts.config });

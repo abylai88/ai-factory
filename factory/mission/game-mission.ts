@@ -220,8 +220,8 @@ export async function executeGameMission(
   }
 
   const projectManager = new MissionProjectManager({ baseDir, provisioner });
-  const innerAdapter = new RealFactoryAdapter();
-  const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager }, innerAdapter);
+  const innerAdapter = new RealFactoryAdapter(state);
+  const factoryAdapter = new MissionAwareFactoryAdapter({ baseDir, projectManager, missionState: state }, innerAdapter);
 
   // Single-Studio policy: only one mission may drive Roblox Studio at a
   // time. Contended → honest BLOCKED error, never a second Studio instance.
