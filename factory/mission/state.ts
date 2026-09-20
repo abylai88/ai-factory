@@ -29,12 +29,15 @@ import {
   PERSISTED_SNAPSHOT_VERSION,
   DecisionRecordSchema,
   MAX_DECISIONS,
+  MAX_QUALITY_FINDINGS,
+  QualityFindingRecordSchema,
   ReadinessEvidenceSchema,
   migrateSnapshot,
   sanitizeForPersistence,
   SnapshotVersionError,
   type DecisionRecord,
   type DecisionCategory,
+  type QualityFindingRecord,
   type ReadinessEvidence,
 } from "./persisted-memory.js";
 import { MissionArtifactSchema, type MissionArtifact } from "./artifact-store.js";
@@ -76,6 +79,8 @@ export interface MissionSnapshot {
   supervisorDecisions: SupervisorDecisionRecord[];
   escalationEvents: EscalationEventRecord[];
   readinessEvidence: ReadinessEvidence | null;
+  /** Persisted quality findings (critic findings + verification outcomes). */
+  qualityFindings: QualityFindingRecord[];
   updatedAt: string;
 }
 
@@ -125,6 +130,7 @@ const SNAPSHOT_SCHEMA = z.object({
     reason: z.string(),
   })).optional(),
   readinessEvidence: ReadinessEvidenceSchema.nullable().optional(),
+  qualityFindings: z.array(QualityFindingRecordSchema).optional(),
   updatedAt: z.string(),
 });
 
@@ -172,6 +178,7 @@ export class MissionState {
   private readinessEvidence: ReadinessEvidence | null = null;
   private supervisorDecisions: SupervisorDecisionRecord[] = [];
   private escalationEvents: EscalationEventRecord[] = [];
+  private qualityFindings: QualityFindingRecord[] = [];
 
   constructor(baseDir: string, missionId: string, options?: { disableLock?: boolean }) {
     const sanitized = sanitizeMissionId(missionId);
@@ -279,6 +286,7 @@ export class MissionState {
     this.supervisorDecisions = validated.supervisorDecisions ?? [];
     this.escalationEvents = validated.escalationEvents ?? [];
     this.readinessEvidence = validated.readinessEvidence ?? null;
+    this.qualityFindings = validated.qualityFindings ?? [];
   }
 
   private async loadFromSnapshot(): Promise<void> {
@@ -535,6 +543,26 @@ export class MissionState {
           }
         }
         break;
+
+      case "mission.quality.recorded":
+        if (payload.qualityFinding) {
+          const parsed = QualityFindingRecordSchema.safeParse(payload.qualityFinding);
+          if (parsed.success && !this.qualityFindings.some((q) => q.id === parsed.data.id)) {
+            this.qualityFindings.push(parsed.data);
+          }
+        }
+        break;
+
+      case "mission.quality.updated":
+        if (payload.qualityFinding) {
+          const parsed = QualityFindingRecordSchema.safeParse(payload.qualityFinding);
+          if (parsed.success) {
+            const idx = this.qualityFindings.findIndex((q) => q.id === parsed.data.id);
+            if (idx >= 0) this.qualityFindings[idx] = parsed.data;
+            else this.qualityFindings.push(parsed.data);
+          }
+        }
+        break;
     }
 
     this.mission.updatedAt = new Date().toISOString();
@@ -602,6 +630,7 @@ export class MissionState {
       readinessEvidence: this.readinessEvidence
         ? (sanitizeForPersistence(this.readinessEvidence) as ReadinessEvidence)
         : null,
+      qualityFindings: sanitizeForPersistence(this.qualityFindings) as QualityFindingRecord[],
       updatedAt: new Date().toISOString(),
     };
 
@@ -787,6 +816,79 @@ export class MissionState {
 
   getReadinessEvidence(): ReadinessEvidence | null {
     return this.readinessEvidence ? { ...this.readinessEvidence } : null;
+  }
+
+  // ── Quality findings: critic findings + verification outcomes ──
+  // Survive restarts via the versioned atomic snapshot so resume keeps
+  // quality history. Summaries only — never secrets, ephemeral Studio
+  // IDs, raw transcripts, or transient process handles.
+
+  getQualityFindings(status?: QualityFindingRecord["status"]): QualityFindingRecord[] {
+    const all = this.qualityFindings.map((q) => ({ ...q }));
+    return status ? all.filter((q) => q.status === status) : all;
+  }
+
+  async recordQualityFinding(input: {
+    id: string;
+    dimension: QualityFindingRecord["dimension"];
+    severity: QualityFindingRecord["severity"];
+    evidence: string;
+    affectedArea?: string;
+    violatedRequirement: string;
+    why: string;
+    proposedOwner: string;
+    repairObjective: string;
+    verificationRequirement: string;
+  }): Promise<QualityFindingRecord> {
+    const now = new Date().toISOString();
+    const record: QualityFindingRecord = {
+      id: input.id.slice(0, 100),
+      missionId: this.missionId,
+      dimension: input.dimension,
+      severity: input.severity,
+      evidence: input.evidence.slice(0, 2000),
+      affectedArea: (input.affectedArea ?? "").slice(0, 500),
+      violatedRequirement: input.violatedRequirement.slice(0, 200),
+      why: input.why.slice(0, 1000),
+      proposedOwner: input.proposedOwner.slice(0, 50),
+      repairObjective: input.repairObjective.slice(0, 1000),
+      verificationRequirement: input.verificationRequirement.slice(0, 1000),
+      status: "open",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const parsed = QualityFindingRecordSchema.parse(record);
+    if (!this.qualityFindings.some((q) => q.id === parsed.id)) {
+      this.qualityFindings.push(parsed);
+      while (this.qualityFindings.length > MAX_QUALITY_FINDINGS) this.qualityFindings.shift();
+    }
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.quality.recorded",
+      payload: { qualityFinding: parsed },
+    });
+    return parsed;
+  }
+
+  async updateQualityFinding(
+    id: string,
+    patch: Partial<Pick<QualityFindingRecord, "status" | "repairDelegationId" | "verificationOutcome">>,
+  ): Promise<QualityFindingRecord | null> {
+    const idx = this.qualityFindings.findIndex((q) => q.id === id);
+    if (idx < 0) return null;
+    const updated: QualityFindingRecord = {
+      ...this.qualityFindings[idx],
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    const parsed = QualityFindingRecordSchema.parse(updated);
+    this.qualityFindings[idx] = parsed;
+    await this.appendEvent({
+      missionId: this.missionId,
+      type: "mission.quality.updated",
+      payload: { qualityFinding: parsed },
+    });
+    return parsed;
   }
 
   /**

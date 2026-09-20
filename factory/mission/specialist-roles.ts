@@ -161,6 +161,16 @@ export function routeFailureToSpecialist(category: FailureCategory): SpecialistR
       return "gameplay";
     case "visual_regression":
       return "visual";
+    case "quality_visual":
+      return "visual";
+    case "quality_ux":
+      return "ui";
+    case "quality_gameplay":
+      return "gameplay";
+    case "quality_technical":
+      return "programmer";
+    case "quality_content":
+      return "content";
     case "tool_unavailable":
       return "director";
     default:
@@ -175,4 +185,42 @@ export function routeFailureTextToSpecialist(message: string): SpecialistRole | 
   if (/datastore|persist|save.*fail|game ?pass|developer ?product|monetiz/.test(t)) return "monetization";
   if (/balance|level.*data|content.*missing|config.*missing/.test(t)) return "content";
   return null;
+}
+
+// ── Quality finding → specialist ownership (Phase 5) ─────────────
+// Every quality finding has an explicit owner. Visual → visual, UI/UX →
+// ui, gameplay/pacing/feedback → gameplay, content/coherence → content,
+// technical → architect/programmer/builder per existing ownership.
+// Never routes everything to programmer.
+
+export type QualityCriticDimension = "visual" | "ux" | "gameplay" | "technical";
+
+export function routeQualityFindingToSpecialist(input: {
+  dimension: QualityCriticDimension;
+  proposedOwner?: string;
+  requirementId?: string;
+  evidenceText?: string;
+}): SpecialistRole {
+  const proposed = (input.proposedOwner ?? "").toLowerCase().trim();
+  if (proposed && isSpecialistRole(proposed)) {
+    // Explicit critic owner wins when it names a real specialist.
+    return proposed;
+  }
+  const req = (input.requirementId ?? "").toLowerCase();
+  const text = `${req} ${(input.evidenceText ?? "").toLowerCase()}`;
+  // Content/coherence signals override dimension defaults.
+  if (/placeholder|filler|terminology|copy|fantasy|debug.*ui|cheat|test.*control/.test(text)) return "content";
+  // Monetization signals keep their owner.
+  if (/datastore|persist|game.?pass|developer.?product|monetiz/.test(text)) return "monetization";
+  // Technical sub-routing per existing ownership.
+  if (input.dimension === "technical") {
+    if (/architect|module.*boundar|build.*config|deterministic|asset.*safety|blueprint/.test(text)) return "architect";
+    return "programmer";
+  }
+  switch (input.dimension) {
+    case "visual": return "visual";
+    case "ux": return "ui";
+    case "gameplay": return "gameplay";
+    default: return "programmer";
+  }
 }

@@ -390,6 +390,9 @@ export const MissionEventSchema = z.object({
     "mission.decision.recorded",
     "mission.repair.recorded",
     "mission.readiness.recorded",
+    // Quality memory events (critic findings, verification outcomes)
+    "mission.quality.recorded",
+    "mission.quality.updated",
   ]),
   payload: z.record(z.string(), z.unknown()),
 });

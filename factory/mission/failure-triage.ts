@@ -15,6 +15,11 @@ export type FailureCategory =
   | "roblox_runtime"
   | "visual_regression"
   | "tool_unavailable"
+  | "quality_visual"
+  | "quality_ux"
+  | "quality_gameplay"
+  | "quality_technical"
+  | "quality_content"
   | "unknown";
 
 export type TriageAction =
@@ -588,4 +593,69 @@ export function buildTriagePrompt(
   }
 
   return sections.join("\n");
+}
+
+// ── Quality finding triage (Phase 5) ───────────────────────────
+// Quality failures are classified SEPARATELY from functional breakage:
+// a failed quality review never means the whole game is technically
+// broken. Each finding routes to its owning specialist (never a generic
+// "send everything to programmer").
+
+import { routeQualityFindingToSpecialist } from "./specialist-roles.js";
+
+export interface QualityTriageInput {
+  findingId: string;
+  dimension: "visual" | "ux" | "gameplay" | "technical";
+  severity: "blocking" | "major" | "minor" | "stretch";
+  violatedRequirement: string;
+  proposedOwner?: string;
+  evidenceText?: string;
+}
+
+export function triageQualityFinding(input: QualityTriageInput): TriageResult {
+  const category: FailureCategory =
+    input.dimension === "visual" ? "quality_visual"
+    : input.dimension === "ux" ? "quality_ux"
+    : input.dimension === "gameplay" ? "quality_gameplay"
+    : "quality_technical";
+  const specialist = routeQualityFindingToSpecialist({
+    dimension: input.dimension,
+    proposedOwner: input.proposedOwner,
+    requirementId: input.violatedRequirement,
+    evidenceText: input.evidenceText,
+  });
+  // Content-coherence findings keep the content owner even when the
+  // dimension-level category says otherwise.
+  const resolvedSpecialist =
+    specialist === "content" ? "content" : routeFailureToSpecialist(category) === "programmer" && specialist !== "programmer"
+      ? specialist
+      : specialist;
+  return {
+    action: "repair",
+    targetRole: specialistCoreRole(resolvedSpecialist),
+    specialist: resolvedSpecialist,
+    category,
+    reason: `Quality finding ${input.findingId} (${input.dimension}/${input.severity}) violates ${input.violatedRequirement} → ${resolvedSpecialist}`,
+    priority: input.severity === "blocking" ? "high" : input.severity === "major" ? "medium" : "low",
+    maxAttempts: 3,
+  };
+}
+
+function specialistCoreRole(specialist: string): string {
+  switch (specialist) {
+    case "visual":
+    case "ui":
+      return "designer";
+    case "gameplay":
+    case "programmer":
+    case "content":
+      return "builder";
+    case "architect":
+      return "architect";
+    case "qa":
+    case "reviewer":
+      return "tester";
+    default:
+      return "builder";
+  }
 }

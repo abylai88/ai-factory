@@ -29,6 +29,7 @@ export const DecisionCategorySchema = z.enum([
   "qa",
   "repair",
   "blueprint",
+  "quality",
 ]);
 export type DecisionCategory = z.infer<typeof DecisionCategorySchema>;
 
@@ -66,6 +67,37 @@ export const ReadinessEvidenceSchema = z.object({
   needsRevalidation: z.boolean(),
 });
 export type ReadinessEvidence = z.infer<typeof ReadinessEvidenceSchema>;
+
+// ── Quality findings (persistent summary only) ─────────────────
+// Persisted through MissionState (the single persistence system):
+// quality requirements snapshots, critic findings, accepted/rejected
+// state, repair linkage, and verification outcome. Never: secrets,
+// ephemeral Studio IDs, raw transcripts, or transient process handles.
+
+export const QualityFindingRecordSchema = z.object({
+  id: z.string().min(1).max(100),
+  missionId: z.string().min(1).max(100),
+  dimension: z.enum(["visual", "ux", "gameplay", "technical"]),
+  severity: z.enum(["blocking", "major", "minor", "stretch"]),
+  evidence: z.string().min(1).max(2000),
+  affectedArea: z.string().max(500).default(""),
+  violatedRequirement: z.string().min(1).max(200),
+  why: z.string().min(1).max(1000),
+  proposedOwner: z.string().min(1).max(50),
+  repairObjective: z.string().min(1).max(1000),
+  verificationRequirement: z.string().min(1).max(1000),
+  /** Accepted, rejected (with rationale), or still open. */
+  status: z.enum(["open", "accepted", "rejected", "fixed", "escalated"]).default("open"),
+  /** Delegation/task ID that performed the repair (repair linkage). */
+  repairDelegationId: z.string().max(100).optional(),
+  /** Verification outcome after repair. */
+  verificationOutcome: z.string().max(500).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type QualityFindingRecord = z.infer<typeof QualityFindingRecordSchema>;
+
+export const MAX_QUALITY_FINDINGS = 100;
 
 // ── Secret sanitization ──────────────────────────────────────
 
@@ -142,6 +174,7 @@ export function migrateSnapshot(parsed: unknown): MigrationResult {
         repairRecords: Array.isArray(data.repairRecords) ? data.repairRecords : [],
         supervisorDecisions: Array.isArray(data.supervisorDecisions) ? data.supervisorDecisions : [],
         escalationEvents: Array.isArray(data.escalationEvents) ? data.escalationEvents : [],
+        qualityFindings: Array.isArray(data.qualityFindings) ? data.qualityFindings : [],
       },
       migratedFrom: 0,
       degraded: false,
@@ -162,7 +195,7 @@ export function migrateSnapshot(parsed: unknown): MigrationResult {
 
   // v1: ensure new fields exist even if a v1 writer omitted them.
   let degraded = false;
-  for (const field of ["artifacts", "decisions", "repairRecords", "supervisorDecisions", "escalationEvents"] as const) {
+  for (const field of ["artifacts", "decisions", "repairRecords", "supervisorDecisions", "escalationEvents", "qualityFindings"] as const) {
     if (data[field] === undefined) {
       data[field] = [];
       degraded = true;
