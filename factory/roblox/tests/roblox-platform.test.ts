@@ -28,6 +28,7 @@ import {
 } from "../platform.js";
 import { validateRobloxProject } from "../validation.js";
 import { isRojoMissingFailure } from "../rojo.js";
+import { runRojo } from "../rojo.js";
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -439,5 +440,119 @@ describe("11. Missing Rojo is infrastructure, not a code bug", () => {
       else process.env.ROJO_BIN = savedBin;
       if (savedPath !== undefined) process.env.ROJO_PATH = savedPath;
     }
+  });
+});
+
+// ─── 12. Build artifact validation (freshness, existence, cleanup order) ──
+describe("12. Build artifact validation proves current build created output", () => {
+  async function makeProject(files: Record<string, string>): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-val-"));
+    for (const [rel, content] of Object.entries(files)) {
+      const full = path.join(dir, rel);
+      await fs.mkdir(path.dirname(full), { recursive: true });
+      await fs.writeFile(full, content, "utf8");
+    }
+    return dir;
+  }
+
+  const MINIMAL_PROJECT = {
+    "default.project.json": JSON.stringify({
+      name: "ArtifactTest",
+      tree: {
+        $className: "DataModel",
+        ReplicatedStorage: { $path: "src/ReplicatedStorage" },
+        ServerScriptService: { $path: "src/ServerScriptService" },
+      },
+    }),
+    "src/ServerScriptService/main.server.lua": "print('hi')\n",
+    "src/ReplicatedStorage/shared.lua": "return {}\n",
+  };
+
+  async function makeFakeRojoBin(writeFn: (outFile: string) => Promise<void>): Promise<string> {
+    const binPath = path.join(os.tmpdir(), `fake-rojo-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const nodeScript = `#!/usr/bin/env node\nconst fs = require('fs');\nconst args = process.argv.slice(2);\nlet outFile = null;\nfor (let i = 0; i < args.length; i++) {\n  if (args[i] === '--output' && i + 1 < args.length) {\n    outFile = args[i + 1];\n    break;\n  }\n}\nif (outFile) {\n  fs.mkdirSync(require('path').dirname(outFile), { recursive: true });\n  fs.writeFileSync(outFile, 'x'.repeat(1234));\n}\nprocess.exit(0);\n`;
+    await fs.writeFile(binPath, nodeScript, "utf8");
+    await fs.chmod(binPath, 0o755);
+    return binPath;
+  }
+
+  async function makeFakeRojoBinThatFails(): Promise<string> {
+    const binPath = path.join(os.tmpdir(), `fake-rojo-fail-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const script = `#!/usr/bin/env node\nprocess.exit(1);\n`;
+    await fs.writeFile(binPath, script, "utf8");
+    await fs.chmod(binPath, 0o755);
+    return binPath;
+  }
+
+  async function makeFakeRojoBinThatWritesEmpty(): Promise<string> {
+    const binPath = path.join(os.tmpdir(), `fake-rojo-empty-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const script = `#!/usr/bin/env node\nconst fs = require('fs');\nconst args = process.argv.slice(2);\nlet outFile = null;\nfor (let i = 0; i < args.length; i++) {\n  if (args[i] === '--output' && i + 1 < args.length) {\n    outFile = args[i + 1];\n    break;\n  }\n}\nif (outFile) {\n  fs.mkdirSync(require('path').dirname(outFile), { recursive: true });\n  fs.writeFileSync(outFile, '');\n}\nprocess.exit(0);\n`;
+    await fs.writeFile(binPath, script, "utf8");
+    await fs.chmod(binPath, 0o755);
+    return binPath;
+  }
+
+  async function makeFakeRojoBinThatDoesNotWrite(): Promise<string> {
+    const binPath = path.join(os.tmpdir(), `fake-rojo-nowrite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const script = `#!/usr/bin/env node\n// Does not write to --output\nprocess.exit(0);\n`;
+    await fs.writeFile(binPath, script, "utf8");
+    await fs.chmod(binPath, 0o755);
+    return binPath;
+  }
+
+  async function makeFakeRojoBinThatWritesStale(outFile: string, mtimeMs: number): Promise<string> {
+    const binPath = path.join(os.tmpdir(), `fake-rojo-stale-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const script = `#!/usr/bin/env node\nconst fs = require('fs');\nconst args = process.argv.slice(2);\nlet outFile = null;\nfor (let i = 0; i < args.length; i++) {\n  if (args[i] === '--output' && i + 1 < args.length) {\n    outFile = args[i + 1];\n    break;\n  }\n}\nif (outFile) {\n  fs.mkdirSync(require('path').dirname(outFile), { recursive: true });\n  fs.writeFileSync(outFile, 'x'.repeat(1234));\n  const mtime = ${mtimeMs};\n  fs.utimesSync(outFile, new Date(mtime), new Date(mtime));\n}\nprocess.exit(0);\n`;
+    await fs.writeFile(binPath, script, "utf8");
+    await fs.chmod(binPath, 0o755);
+    return binPath;
+  }
+
+  it("A. build output is validated before cleanup (temp file exists during validation)", async () => {
+    const projectDir = await makeProject(MINIMAL_PROJECT);
+    const fakeBin = await makeFakeRojoBin(async () => {});
+    const result = await validateRobloxProject(projectDir, { runRojoBuild: true, rojoBin: fakeBin });
+    expect(result.status).toBe("PASS");
+    expect(result.checks.some((c) => c.name === "artifact-exists" && c.passed)).toBe(true);
+    expect(result.checks.some((c) => c.name === "artifact-fresh" && c.passed)).toBe(true);
+    await fs.rm(projectDir, { recursive: true, force: true });
+  });
+
+  it("B. missing output after successful build => FAIL", async () => {
+    const projectDir = await makeProject(MINIMAL_PROJECT);
+    const fakeBin = await makeFakeRojoBinThatDoesNotWrite();
+    const result = await validateRobloxProject(projectDir, { runRojoBuild: true, rojoBin: fakeBin });
+    expect(result.status).toBe("FAIL");
+    expect(result.stderr).toMatch(/output artifact|does not exist/i);
+    await fs.rm(projectDir, { recursive: true, force: true });
+  });
+
+  it("C. stale pre-existing output cannot pass (mtime predates build start)", async () => {
+    const projectDir = await makeProject(MINIMAL_PROJECT);
+    const buildStartMs = Date.now() + 1000; // buildStartMs will be recorded after this
+    const staleMtime = buildStartMs - 5000; // 5 seconds before build start
+    const fakeBin = await makeFakeRojoBinThatWritesStale("", staleMtime);
+    const result = await validateRobloxProject(projectDir, { runRojoBuild: true, rojoBin: fakeBin });
+    expect(result.status).toBe("FAIL");
+    expect(result.stderr).toMatch(/stale|predates|pre-existing/i);
+    await fs.rm(projectDir, { recursive: true, force: true });
+  });
+
+  it("D. newly generated output passes (mtime >= buildStartMs)", async () => {
+    const projectDir = await makeProject(MINIMAL_PROJECT);
+    const fakeBin = await makeFakeRojoBin(async () => {});
+    const result = await validateRobloxProject(projectDir, { runRojoBuild: true, rojoBin: fakeBin });
+    expect(result.status).toBe("PASS");
+    expect(result.checks.some((c) => c.name === "artifact-fresh" && c.passed)).toBe(true);
+    await fs.rm(projectDir, { recursive: true, force: true });
+  });
+
+  it("E. empty output fails", async () => {
+    const projectDir = await makeProject(MINIMAL_PROJECT);
+    const fakeBin = await makeFakeRojoBinThatWritesEmpty();
+    const result = await validateRobloxProject(projectDir, { runRojoBuild: true, rojoBin: fakeBin });
+    expect(result.status).toBe("FAIL");
+    expect(result.stderr).toMatch(/empty/i);
+    await fs.rm(projectDir, { recursive: true, force: true });
   });
 });

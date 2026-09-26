@@ -1,0 +1,8 @@
+# Rokit toolchain manifest (https://github.com/rojo-rbx/rokit).
+# Pins the Rojo version for `rokit install` on machines that manage Rojo
+# through Rokit (e.g. the Windows Roblox tooling environment).
+# The factory itself invokes the resolved Rojo binary directly and never
+# requires this file — it exists for Studio-side workflows.
+
+[tools]
+rojo = "rojo-rbx/rojo@7.7.0"

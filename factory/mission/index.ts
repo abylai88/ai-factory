@@ -30,6 +30,7 @@ import { createMissionSupervisor } from "./mission-supervisor.js";
 import { PeerReviewSystem } from "./peer-review.js";
 import { deriveBlueprintFromGoal } from "./blueprint.js";
 import { acquireLock, studioLockName, type LockHandle } from "./resource-control.js";
+import { createStudioBridge } from "../studio/mcp-bridge.js";
 
 const ALLOWED_TEMPLATES = ["phaser-generic-web-template", "yagames-phaser-template", "roblox-rojo-template"] as const;
 
@@ -455,6 +456,25 @@ async function main(): Promise<void> {
       maxRepairAttempts: 3,
     };
 
+    // Quality stage for resume: same bridge setup as main path.
+    let resumeQualityStage: typeof qualityStage;
+    if (isResumeRoblox) {
+      let bridge: ReturnType<typeof createStudioBridge> | undefined;
+      try {
+        bridge = createStudioBridge();
+      } catch {
+        bridge = undefined;
+      }
+      resumeQualityStage = {
+        enabled: true,
+        bridge,
+        maxRounds: 3,
+        repairBudget: maxRepairs,
+      };
+    } else {
+      resumeQualityStage = undefined;
+    }
+
     const pixelOfficeReporter = createPixelOfficeReporter(eventSink, console.log);
     if (pixelOfficeReporter) {
       pixelOfficeReporter.start();
@@ -476,6 +496,7 @@ async function main(): Promise<void> {
       validation,
       supervisor,
       resume: true,
+      qualityStage: resumeQualityStage,
     });
 
     console.log("\n🚀 Resuming mission execution...\n");
@@ -650,6 +671,29 @@ async function main(): Promise<void> {
     maxRepairAttempts: 3,
   };
 
+// Production quality stage config: enabled by default for Roblox,
+ // optional/absent for Web to preserve backward compatibility.
+ // Delegates to orchestrator.collectQualityReview / executeQualityRepair which use
+ // the Studio bridge for real evidence (screenshot, UI, scene) and real repair delegations.
+ let qualityStageBridge: ReturnType<typeof createStudioBridge> | undefined;
+ if (isMainRoblox) {
+   try {
+     qualityStageBridge = createStudioBridge();
+   } catch {
+     // Bridge creation failed (e.g., no STUDIO_BRIDGE_URL configured).
+     // Quality stage will honestly report unavailable evidence.
+     qualityStageBridge = undefined;
+   }
+ }
+ const qualityStage = isMainRoblox
+   ? {
+       enabled: true,
+       bridge: qualityStageBridge,
+       maxRounds: 3,
+       repairBudget: maxRepairs,
+     }
+   : undefined;
+
   // Start Pixel Office reporting if configured
   const pixelOfficeReporter = createPixelOfficeReporter(eventSink, console.log);
   if (pixelOfficeReporter) {
@@ -677,6 +721,7 @@ async function main(): Promise<void> {
     // peerReview: undefined (not enabled without real executor)
     validation,
     supervisor,
+    qualityStage,
   });
 
   console.log("\n🚀 Starting mission execution...\n");

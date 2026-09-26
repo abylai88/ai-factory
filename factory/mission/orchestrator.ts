@@ -50,6 +50,8 @@ import type { MissionSupervisor } from "./mission-supervisor.js";
 import type { SupervisorDecision } from "./mission-supervisor.js";
 import { isModelProviderFailure } from "./model-failure-classifier.js";
 import { randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 
 export interface FactoryExecutionAdapter {
   runDelegation(delegation: Delegation, mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }): Promise<AgentResult>;
@@ -111,6 +113,16 @@ const DEFAULT_MAX_REPAIRS = 3;
 const MAX_OUTPUT_CHARS = 10_000_000;
 // Default global mission timeout: 2 hours
 const DEFAULT_MAX_MISSION_DURATION_MS = 2 * 60 * 60 * 1000;
+
+/** Normalize a place or project name for identity comparison. */
+export function normalizePlaceName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\.(rbxlx?|rbxl)$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 export class MissionOrchestrator {
   private readonly config: OrchestratorConfig;
@@ -1839,15 +1851,63 @@ export class MissionOrchestrator {
     const passedCount = delegations.filter((d) => d.status === "passed").length;
     const readiness = this.config.missionState.getReadinessEvidence();
     const visualQa = this.config.missionState.getVisualQaResult();
+
+    // Build Roblox-specific functional evidence including validation gate results.
+    const validationResults = delegations
+      .filter((d) => d.description.includes("VALIDATION") || d.description.includes("validation"))
+      .map((d) => `${d.title}: ${d.status} (${d.error ?? "ok"})`)
+      .join("; ");
+
+    const isRoblox = mission.context?.engine === "roblox";
+    let functionalEvidence = `delegation graph passed (${passedCount}/${delegations.length}); implementation artifacts registered`;
+    if (isRoblox) {
+      const rojoBuildPassed = delegations.some((d) =>
+        d.description.includes("BUILD") && d.status === "passed"
+      );
+      functionalEvidence = `Rojo validation: ${validationResults || "structural+luau+build"}; ` +
+        `graph: ${passedCount}/${delegations.length} passed; ` +
+        `rojoBuild: ${rojoBuildPassed ? "PASS" : "not-run"}`;
+    }
+
     const functional: FunctionalInputs = {
       functionalPass: true,
-      functionalEvidence: `delegation graph passed (${passedCount}/${delegations.length}); implementation artifacts registered`,
+      functionalEvidence,
       runtimePass: Boolean(readiness && !readiness.needsRevalidation),
       runtimeEvidence: readiness?.evidence ?? visualQa?.errors?.join("; ") ?? "",
       ...cfg.functional,
     };
 
-    const review = cfg.review ?? (async (round: number) => this.collectQualityReview(round, contract, directorVisionText));
+    // Project identity verification: ensure Studio place matches Rojo project.
+    let identityMatched = true;
+    let identityReason: string | undefined;
+    if (isRoblox && cfg.bridge) {
+      const identity = await this.verifyProjectIdentity(cfg.bridge);
+      identityMatched = identity.matched;
+      identityReason = identity.reason;
+    }
+
+    const baseReview = cfg.review ?? (async (round: number) => this.collectQualityReview(round, contract, directorVisionText, identityMatched, identityReason));
+    const review = async (round: number) => {
+      const result = await baseReview(round);
+      // If project identity mismatched, inject a blocking finding that cannot be repaired.
+      if (!identityMatched) {
+        const mismatchFinding: import("./quality-critics.js").QualityFinding = {
+          id: `QF-IDENTITY-MISMATCH-${mission.id.slice(0, 8)}`,
+          dimension: "technical",
+          severity: "blocking",
+          evidence: identityReason ?? `Studio place does not match Rojo project ${mission.context?.projectId}`,
+          affectedArea: "project-identity",
+          violatedRequirement: "project-identity-match",
+          why: "Mission project identity does not match the Studio place. This indicates a foreign Studio project is open.",
+          proposedOwner: "programmer",
+          repairObjective: "Ensure the correct Studio place is open for the Rojo project. Close foreign places.",
+          verificationRequirement: "Verify Studio place name matches Rojo project name.",
+          createdAt: new Date().toISOString(),
+        };
+        result.findings = [...result.findings, mismatchFinding];
+      }
+      return result;
+    };
     const repairOne = cfg.repairOne ?? (async (task: QualityRepairTask, finding) => this.executeQualityRepair(task, finding));
 
     const outcome = await runProductionQualityStage(
@@ -1866,11 +1926,70 @@ export class MissionOrchestrator {
     return outcome.gate.productionPass;
   }
 
+  /** Verify that the Studio place matches the Rojo project (name identity). */
+  private async verifyProjectIdentity(
+    bridge: QualityScreenshotBridge & UiEvidenceBridge,
+  ): Promise<{ matched: boolean; reason?: string }> {
+    const projectDir = this.config.project;
+    let rojoName: string | undefined;
+    try {
+      const projectJson = JSON.parse(await fs.readFile(path.join(projectDir, "default.project.json"), "utf8"));
+      rojoName = projectJson.name;
+    } catch {
+      // Could not read Rojo project name.
+    }
+    if (!rojoName) return { matched: true, reason: "no Rojo project name to verify" };
+
+    try {
+      const connected = await bridge.callTool("get_connected_instances", {});
+      if (!connected.ok) {
+        // No connected instance — treat as unavailable, not mismatch.
+        return { matched: true, reason: "no connected Studio instance for identity check" };
+      }
+      const stdout = connected.stdout ?? "";
+      let instances: Array<{ id?: string; placeName?: string }> = [];
+      try {
+        const parsed = JSON.parse(stdout);
+        instances = parsed.instances ?? (Array.isArray(parsed) ? parsed : []);
+      } catch {
+        // Could not parse connected instances — treat as unavailable.
+        return { matched: true, reason: "could not parse connected Studio instances" };
+      }
+      const placeName = instances.find((i) => i.placeName)?.placeName;
+      if (!placeName) {
+        // No placeName available — treat as unavailable, not mismatch.
+        return { matched: true, reason: "connected Studio instance has no placeName for identity check" };
+      }
+      const normalizedPlace = normalizePlaceName(placeName);
+      const normalizedProject = normalizePlaceName(rojoName);
+      if (normalizedPlace !== normalizedProject) {
+        this.publisher.publish({
+          missionId: this.currentMission!.id,
+          type: "mission.projectIdentity.mismatch" as any,
+          payload: {
+            rojoName,
+            studioPlaceName: placeName,
+          },
+        });
+        return {
+          matched: false,
+          reason: `Studio place "${placeName}" does not match Rojo project "${rojoName}"`,
+        };
+      }
+      return { matched: true };
+    } catch {
+      // Identity check failed — treat as unavailable rather than mismatch.
+      return { matched: true, reason: "identity check unavailable" };
+    }
+  }
+
   /** Default round-aware review: state evidence + bounded live reads. */
   private async collectQualityReview(
     round: number,
     contract: ReturnType<typeof deriveQualityContract> | undefined,
     directorVisionText: string,
+    identityMatched: boolean = true,
+    identityReason?: string,
   ) {
     const mission = this.currentMission!;
     const blueprint = (mission as unknown as { blueprint?: import("./blueprint.js").ProductionBlueprint }).blueprint;
@@ -1890,10 +2009,11 @@ export class MissionOrchestrator {
     );
 
     // Bounded live reads (read-only; each degrades to unavailable).
+    // If project identity does not match, DO NOT use foreign Studio scene/screenshot/UI data.
     let sceneSummary: string | undefined;
     let screenshotRef: string | undefined;
     let uiInventory: string | undefined;
-    if (bridge) {
+    if (bridge && identityMatched) {
       try {
         const structure = await bridge.callTool("get_project_structure", {
           path: "game.Workspace",
@@ -1990,7 +2110,7 @@ export class MissionOrchestrator {
     } catch {
       return { fixed: false, note: "could not register repair delegation" };
     }
-    const result = await this.executeDelegation(repairDelegation);
+    const result = await this.executeDelegation(repairDelegation, QUALITY_REPAIR_MODEL);
     if (result.status === "passed") {
       try {
         await this.config.missionState.updateQualityFinding(finding.id, {
@@ -2708,7 +2828,9 @@ export interface ReadOnlyAdapterConfig {
 }
 
 const DEFAULT_READ_ONLY_AGENT = "researcher";
-const DEFAULT_READ_ONLY_TIMEOUT_MS = 180_000;
+const DEFAULT_READ_ONLY_MODEL = "opencode/mimo-v2.5-free";
+const QUALITY_REPAIR_MODEL = "opencode/mimo-v2.5-free";
+const DEFAULT_READ_ONLY_TIMEOUT_MS = 300_000;
 
 export class ReadOnlyFactoryAdapter implements FactoryExecutionAdapter {
   private readonly config: ReadOnlyAdapterConfig;
@@ -2720,6 +2842,7 @@ export class ReadOnlyFactoryAdapter implements FactoryExecutionAdapter {
   async runDelegation(delegation: Delegation, _mission: Mission, config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal }): Promise<AgentResult> {
     const agent = this.config.agent ?? DEFAULT_READ_ONLY_AGENT;
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_READ_ONLY_TIMEOUT_MS;
+    const effectiveModel = config.model ?? this.config.model ?? DEFAULT_READ_ONLY_MODEL;
 
     // Reject immediately if already aborted
     if (config.signal?.aborted) {
@@ -2760,7 +2883,7 @@ IMPORTANT: This is a READ-ONLY mission. Do NOT modify anything.
     const startTime = Date.now();
 
     try {
-      const result = await this.runOpenCode(agent, prompt, config.project, timeoutMs, config.model, config.signal);
+      const result = await this.runOpenCode(agent, prompt, config.project, timeoutMs, effectiveModel, config.signal);
       const durationMs = Date.now() - startTime;
 
       if (result.timedOut) {

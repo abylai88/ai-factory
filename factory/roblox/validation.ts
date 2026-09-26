@@ -408,6 +408,7 @@ export async function validateRobloxProject(
   checks.push({ name: "luau-syntax-tools", passed: true, message: "external checks passed or no tools installed" });
 
   // 7. `rojo build` when available; missing Rojo is BLOCKED infrastructure.
+  //    A successful build must produce a fresh, non-empty, readable .rbxlx artifact.
   if (opts?.runRojoBuild !== false) {
     const resolution = opts?.rojoBin
       ? { found: true as const, bin: opts.rojoBin }
@@ -432,6 +433,13 @@ export async function validateRobloxProject(
       };
     }
     const outFile = path.join(os.tmpdir(), `roblox-validate-${Date.now()}.rbxlx`);
+    // Remove any pre-existing temp output BEFORE rojo build
+    try {
+      await fs.rm(outFile, { force: true });
+    } catch {
+      // ignore
+    }
+    const buildStartMs = Date.now();
     const built = await runRojo(["build", "default.project.json", "--output", outFile], {
       cwd: projectDir,
       timeoutMs,
@@ -440,17 +448,27 @@ export async function validateRobloxProject(
     });
     command = built.command;
     try {
-      await fs.rm(outFile, { force: true });
-    } catch {
-      // best-effort cleanup
+      if (!built.ok) {
+        checks.push({ name: "rojo-build", passed: false, message: built.stderr.slice(0, 300) });
+        stderrLines.push(built.stderr);
+        return fail(`rojo build failed: ${built.stderr.slice(0, 500)}`, built.command);
+      }
+      // Validate the build output artifact (proves it was created by THIS build).
+      const artifactChecks = await validateBuildArtifact(outFile, projectDir, buildStartMs);
+      checks.push(...artifactChecks.checks);
+      if (!artifactChecks.valid) {
+        return fail(artifactChecks.reason ?? "rojo build artifact invalid", built.command);
+      }
+      checks.push({ name: "rojo-build", passed: true, message: "rojo build succeeded" });
+      stdoutLines.push(built.stdout);
+    } finally {
+      // Clean up temp output AFTER validation
+      try {
+        await fs.rm(outFile, { force: true });
+      } catch {
+        // best-effort cleanup
+      }
     }
-    if (!built.ok) {
-      checks.push({ name: "rojo-build", passed: false, message: built.stderr.slice(0, 300) });
-      stderrLines.push(built.stderr);
-      return fail(`rojo build failed: ${built.stderr.slice(0, 500)}`, built.command);
-    }
-    checks.push({ name: "rojo-build", passed: true, message: "rojo build succeeded" });
-    stdoutLines.push(built.stdout);
   }
 
   return {
@@ -464,4 +482,72 @@ export async function validateRobloxProject(
     reason: `Roblox/Rojo project valid (${luauFiles.length} Luau file(s), ${mappings.length} mapping(s)).`,
     affectedFiles: [...new Set(affectedFiles)],
   };
+}
+
+/**
+ * Validate that a Rojo build artifact is fresh, non-empty, and readable.
+ *
+ * A build PASS must require:
+ * - output file exists
+ * - output file is readable
+ * - output file is non-empty ( > 0 bytes)
+ * - output file has a modification timestamp >= buildStartMs (proves current build created it)
+ * - output .rbxlx file corresponds to the current project structure
+ *
+ * Returns { valid, checks, reason }.
+ */
+async function validateBuildArtifact(
+  outFile: string,
+  projectDir: string,
+  buildStartMs: number
+): Promise<{ valid: boolean; checks: RobloxCheck[]; reason?: string }> {
+  const checks: RobloxCheck[] = [];
+  // 1. Output file must exist
+  const fileExists = await fs.access(outFile).then(() => true).catch(() => false);
+  if (!fileExists) {
+    checks.push({ name: "artifact-exists", passed: false, message: "build output file does not exist" });
+    return { valid: false, checks, reason: "Rojo build did not produce output artifact" };
+  }
+  checks.push({ name: "artifact-exists", passed: true, message: "build output file exists" });
+
+  // 2. Output file must be readable and non-empty
+  let stats;
+  try {
+    stats = await fs.stat(outFile);
+  } catch {
+    checks.push({ name: "artifact-readable", passed: false, message: "build output file is not readable" });
+    return { valid: false, checks, reason: "Rojo build output is not readable" };
+  }
+  if (stats.size === 0) {
+    checks.push({ name: "artifact-empty", passed: false, message: "build output file is empty (0 bytes)" });
+    return { valid: false, checks, reason: "Rojo build produced empty artifact" };
+  }
+  checks.push({ name: "artifact-empty", passed: true, message: `${stats.size} bytes` });
+
+  // 3. Output file must have mtime >= buildStartMs (proves THIS build created it)
+  // Allow small filesystem timestamp tolerance (1 second)
+  const FS_TOLERANCE_MS = 1000;
+  if (stats.mtimeMs + FS_TOLERANCE_MS < buildStartMs) {
+    checks.push({
+      name: "artifact-fresh",
+      passed: false,
+      message: `build output mtime ${new Date(stats.mtimeMs).toISOString()} predates build start ${new Date(buildStartMs).toISOString()}`,
+    });
+    return { valid: false, checks, reason: "Rojo build output is stale (pre-existing artifact)" };
+  }
+  checks.push({
+    name: "artifact-fresh",
+    passed: true,
+    message: `artifact mtime ${new Date(stats.mtimeMs).toISOString()} >= build start ${new Date(buildStartMs).toISOString()}`,
+  });
+
+  // 4. Output file must be an .rbxlx (Roblox place file)
+  const isRbxlx = outFile.toLowerCase().endsWith(".rbxlx");
+  if (!isRbxlx) {
+    checks.push({ name: "artifact-type", passed: false, message: "build output is not a .rbxlx file" });
+    return { valid: false, checks, reason: "Rojo build did not produce a .rbxlx artifact" };
+  }
+  checks.push({ name: "artifact-type", passed: true, message: ".rbxlx file" });
+
+  return { valid: true, checks };
 }

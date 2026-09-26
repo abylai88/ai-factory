@@ -1,0 +1,24 @@
+{
+  "name": "Coin Rush Arena",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$path": "src/ServerScriptService"
+    },
+    "ReplicatedStorage": {
+      "$path": "src/ReplicatedStorage"
+    },
+    "ServerStorage": {
+      "$path": "src/ServerStorage"
+    },
+    "StarterGui": {
+      "$path": "src/StarterGui"
+    },
+    "StarterPlayer": {
+      "$path": "src/StarterPlayer"
+    },
+    "Workspace": {
+      "$path": "src/Workspace"
+    }
+  }
+}

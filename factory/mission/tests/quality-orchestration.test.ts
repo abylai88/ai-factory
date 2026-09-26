@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createMission, createDelegation, type Delegation, type AgentResult } from "../mission.js";
+import { createMission, createDelegation, type Delegation, type AgentResult, type Mission } from "../mission.js";
 import { MissionState } from "../state.js";
 import { MissionOrchestrator } from "../orchestrator.js";
 import { InMemoryEventSink } from "../events.js";
@@ -532,5 +532,387 @@ describe("secret and ephemeral scrubbing", () => {
     await state.recordQualityStage({ status: "passed", rounds: 0, summary: "PASS", productionPass: true });
     const snap = await fs.readFile(path.join(tmpDir, "outputs", "missions", `${mission.id}.state.json`), "utf8");
     expect(snap).not.toMatch(/authToken|peerId|instanceId/);
+  });
+});
+
+describe("regression: false-positive quality gate", () => {
+  it("blocks when Rojo source looks valid but runtime evidence is missing (stale place, no playtest)", async () => {
+    // Simulate the false-positive scenario:
+    // - Valid-looking Rojo project structure (default.project.json, src/ directories)
+    // - Delegation graph passed (artifacts registered)
+    // - But NO real runtime evidence (no playtest, no runtime assertions, stale Studio place)
+    // - Quality gate should BLOCK because visual/ux/gameplay evidence is unavailable
+
+    const functional = {
+      functionalPass: true,
+      functionalEvidence: "Rojo validation: structural+luau+build; graph: 5/5 passed; rojoBuild: PASS",
+      runtimePass: false,
+      runtimeEvidence: "",
+    };
+
+    // Reviews with NO visual evidence (Studio not connected, stale place)
+    const reviews = [
+      { dimension: "visual" as const, status: "unavailable" as const, findings: [], evidenceNotes: ["VISUAL_UNAVAILABLE: Studio not connected"], reviewedAt: new Date().toISOString() },
+      { dimension: "ux" as const, status: "unavailable" as const, findings: [], evidenceNotes: ["UI_UNAVAILABLE: Studio not connected"], reviewedAt: new Date().toISOString() },
+      { dimension: "gameplay" as const, status: "unavailable" as const, findings: [], evidenceNotes: ["GAMEPLAY_UNAVAILABLE: no runtime assertions"], reviewedAt: new Date().toISOString() },
+      { dimension: "technical" as const, status: "pass" as const, findings: [], evidenceNotes: ["logs clean"], reviewedAt: new Date().toISOString() },
+    ];
+
+    const gate = evaluateProductionQualityGate({
+      functional,
+      reviews,
+      unresolvedFindings: [],
+    });
+
+    // Should BLOCK because visual/ux/gameplay are unavailable
+    expect(gate.productionPass).toBe(false);
+    expect(gate.summary).toContain("visual not PASS");
+    expect(gate.summary).toContain("ux unavailable");
+    expect(gate.summary).toContain("gameplay unavailable");
+    expect(gate.dimensions.find((d) => d.dimension === "visual")?.status).toBe("unavailable");
+    expect(gate.dimensions.find((d) => d.dimension === "ux")?.status).toBe("unavailable");
+    expect(gate.dimensions.find((d) => d.dimension === "gameplay")?.status).toBe("unavailable");
+  });
+
+  it("blocks when delegation artifacts exist but no real runtime verification occurred", async () => {
+    // Scenario: artifacts registered, delegation graph passed, but no playtest/runtime QA ran
+    const functional = {
+      functionalPass: true,
+      functionalEvidence: "delegation graph passed (8/8); implementation artifacts registered",
+      runtimePass: false,
+      runtimeEvidence: "",
+    };
+
+    const reviews = [
+      { dimension: "visual" as const, status: "unavailable" as const, findings: [], evidenceNotes: ["VISUAL_UNAVAILABLE"], reviewedAt: new Date().toISOString() },
+      { dimension: "ux" as const, status: "unavailable" as const, findings: [], evidenceNotes: ["UI_UNAVAILABLE"], reviewedAt: new Date().toISOString() },
+      { dimension: "gameplay" as const, status: "unavailable" as const, findings: [], evidenceNotes: ["GAMEPLAY_UNAVAILABLE"], reviewedAt: new Date().toISOString() },
+      { dimension: "technical" as const, status: "pass" as const, findings: [], evidenceNotes: ["build clean"], reviewedAt: new Date().toISOString() },
+    ];
+
+    const gate = evaluateProductionQualityGate({
+      functional,
+      reviews,
+      unresolvedFindings: [],
+    });
+
+    expect(gate.productionPass).toBe(false);
+    expect(gate.summary).toContain("runtime FAIL");
+    expect(gate.summary).toContain("visual not PASS");
+  });
+
+  it("passes only when functional + runtime + visual + ux + gameplay all have evidence", async () => {
+    const functional = {
+      functionalPass: true,
+      functionalEvidence: "Rojo validation PASS; runtime assertions 5/5",
+      runtimePass: true,
+      runtimeEvidence: "playtest PASS; collect/upgrade assertions 5/5; spawn safe",
+    };
+
+    const reviews = [
+      { dimension: "visual" as const, status: "pass" as const, findings: [], evidenceNotes: ["screenshot: coin field visible"], reviewedAt: new Date().toISOString() },
+      { dimension: "ux" as const, status: "pass" as const, findings: [], evidenceNotes: ["HUD shows currency + objective"], reviewedAt: new Date().toISOString() },
+      { dimension: "gameplay" as const, status: "pass" as const, findings: [], evidenceNotes: ["first-minute onboarding observed"], reviewedAt: new Date().toISOString() },
+      { dimension: "technical" as const, status: "pass" as const, findings: [], evidenceNotes: ["logs clean; server-authoritative currency"], reviewedAt: new Date().toISOString() },
+    ];
+
+    const gate = evaluateProductionQualityGate({
+      functional,
+      reviews,
+      unresolvedFindings: [],
+    });
+
+    expect(gate.productionPass).toBe(true);
+    expect(gate.summary).toContain("PRODUCTION_QUALITY_PASS");
+  });
+});
+
+// Regression: foreign Studio place must block production quality
+describe("regression: foreign Studio project identity blocks production", () => {
+  it("foreign Studio place (ai-factory-coin-simulator) cannot satisfy coin-rush-arena production quality", () => {
+    // Simulate the known foreign-place scenario:
+    // - Mission project = coin-rush-arena (Rojo project name)
+    // - Studio place = ai-factory-coin-simulator.rbxlx (different name)
+    // This should produce a blocking finding that prevents productionPass
+
+    const functional = {
+      functionalPass: true,
+      functionalEvidence: "Rojo validation: structural+luau+build; graph: 5/5 passed; rojoBuild: PASS",
+      runtimePass: true,
+      runtimeEvidence: "playtest PASS; collect/upgrade assertions 5/5; spawn safe",
+    };
+
+    // All critics pass (evidence looks good), but identity mismatch adds a blocking finding
+    const reviews = [
+      { dimension: "visual" as const, status: "pass" as const, findings: [], evidenceNotes: ["screenshot: coin field visible"], reviewedAt: new Date().toISOString() },
+      { dimension: "ux" as const, status: "pass" as const, findings: [], evidenceNotes: ["HUD shows currency + objective"], reviewedAt: new Date().toISOString() },
+      { dimension: "gameplay" as const, status: "pass" as const, findings: [], evidenceNotes: ["first-minute onboarding observed"], reviewedAt: new Date().toISOString() },
+      { dimension: "technical" as const, status: "pass" as const, findings: [], evidenceNotes: ["logs clean; server-authoritative currency"], reviewedAt: new Date().toISOString() },
+    ];
+
+    const identityMismatchFinding: import("../quality-critics.js").QualityFinding = {
+      id: "QF-IDENTITY-MISMATCH-abc123",
+      dimension: "technical",
+      severity: "blocking",
+      evidence: 'Studio place name "game ai-factory-coin-simulator" does not match Rojo project "coin-rush-arena"',
+      affectedArea: "project-identity",
+      violatedRequirement: "project-identity-match",
+      why: "Mission project identity does not match the Studio place. This indicates a foreign Studio project is open.",
+      proposedOwner: "programmer",
+      repairObjective: "Ensure the correct Studio place is open for the Rojo project. Close foreign places.",
+      verificationRequirement: "Verify Studio place name matches Rojo project name.",
+      createdAt: new Date().toISOString(),
+    };
+
+    const gate = evaluateProductionQualityGate({
+      functional,
+      reviews,
+      unresolvedFindings: [identityMismatchFinding],
+    });
+
+    // Must BLOCK production - foreign place cannot satisfy quality
+    expect(gate.productionPass).toBe(false);
+    expect(gate.summary).toContain("production-quality BLOCKED");
+    expect(gate.summary).toContain("unresolved required finding");
+    expect(gate.blockingFindings.length).toBe(1);
+    expect(gate.blockingFindings[0].violatedRequirement).toBe("project-identity-match");
+  });
+
+  it("identity mismatch finding is blocking severity and escalates when repair cannot fix it", async () => {
+    // The identity mismatch finding should be blocking severity
+    // and the quality repair loop should escalate it when repair fails
+    // (only correct Studio place can fix it - code repair cannot)
+
+    const { runQualityRepairLoop } = await import("../quality-gate.js");
+
+    const functional = {
+      functionalPass: true,
+      functionalEvidence: "build ok",
+      runtimePass: true,
+      runtimeEvidence: "assertions pass",
+    };
+
+    const reviews = [
+      { dimension: "visual" as const, status: "pass" as const, findings: [], evidenceNotes: ["visual evidenced"], reviewedAt: new Date().toISOString() },
+      { dimension: "ux" as const, status: "pass" as const, findings: [], evidenceNotes: ["ux evidenced"], reviewedAt: new Date().toISOString() },
+      { dimension: "gameplay" as const, status: "pass" as const, findings: [], evidenceNotes: ["gameplay evidenced"], reviewedAt: new Date().toISOString() },
+      { dimension: "technical" as const, status: "pass" as const, findings: [], evidenceNotes: ["technical evidenced"], reviewedAt: new Date().toISOString() },
+    ];
+
+    const identityFinding: import("../quality-critics.js").QualityFinding = {
+      id: "QF-IDENTITY-MISMATCH-test",
+      dimension: "technical",
+      severity: "blocking",
+      evidence: 'Studio place "foreign-place" != Rojo "my-project"',
+      affectedArea: "project-identity",
+      violatedRequirement: "project-identity-match",
+      why: "Foreign Studio project open",
+      proposedOwner: "programmer",
+      repairObjective: "Open correct Studio place",
+      verificationRequirement: "Verify place name matches",
+      createdAt: new Date().toISOString(),
+    };
+
+    const outcome = await runQualityRepairLoop({
+      initialFindings: [identityFinding],
+      functional,
+      reviews,
+      maxRounds: 2,
+      repairBudget: 2,
+      repairOne: async () => ({ fixed: false, note: "cannot repair - wrong Studio place open" }),
+    });
+
+    // The repair loop escalates the finding when repair budget exhausted
+    expect(outcome.escalated.length).toBe(1);
+    expect(outcome.escalated[0].violatedRequirement).toBe("project-identity-match");
+    // The runQualityRepairLoop's gate doesn't include escalated findings (quality-stage does that),
+    // but the escalated finding would block production in the full quality stage
+    expect(outcome.unresolved.length).toBe(0); // moved to escalated
+  });
+});
+
+// Regression: quality repair must use explicit model override
+describe("regression: quality repair model routing", () => {
+  it("executeQualityRepair passes opencode/mimo-v2.5-free as model override to executeDelegation", async () => {
+    const capturedModels: string[] = [];
+    const capturingAdapter = {
+      runDelegation: async (
+        delegation: Delegation,
+        _mission: Mission,
+        config: { baseDir: string; project: string; fromStep?: string; model?: string; signal?: AbortSignal },
+      ): Promise<AgentResult> => {
+        capturedModels.push(config.model ?? "__none__");
+        return {
+          delegationId: delegation.id,
+          status: "passed" as const,
+          output: "repair complete",
+          durationMs: 1,
+        };
+      },
+    };
+
+    const uiFinding = finding({ proposedOwner: "ui" });
+    const mission = createMission("Create a Roblox coin simulator with upgrades");
+    const stateDir = path.join(tmpDir, "state-model");
+    await fs.mkdir(stateDir, { recursive: true });
+    const state = new MissionState(stateDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    const del = createDelegation(
+      mission.id,
+      "obj-1",
+      "Implement collect system",
+      "ROLE: developer\nImplement the collect system end to end",
+      "engineering",
+      {
+        stepIds: [],
+        dependsOn: [],
+        acceptanceCriteria: ["done"],
+        role: "Developer",
+        requiresReview: false,
+      },
+    );
+    const plan = {
+      id: "plan-model",
+      missionId: mission.id,
+      objectives: [{ id: "obj-1", title: "Build", description: "build", delegations: [del.id] }],
+      delegations: [del],
+      risks: [],
+      validationGates: [],
+      createdAt: new Date().toISOString(),
+    };
+    await state.setPlan(plan);
+    await state.addDelegation(del);
+
+    let reviewCount = 0;
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 1,
+      baseDir: tmpDir,
+      project: path.join(tmpDir, "proj"),
+      factoryAdapter: capturingAdapter,
+      auditor: passingAuditor,
+      eventSink: new InMemoryEventSink(),
+      missionState: state,
+      qualityStage: {
+        enabled: true,
+        maxRounds: 2,
+        repairBudget: 1,
+        functional: strongFunctional,
+        review: async () => {
+          reviewCount += 1;
+          return reviewCount === 1
+            ? { reviews: passReview().reviews, findings: [uiFinding] }
+            : passReview();
+        },
+      },
+    });
+    const result = await orchestrator.executeMission(mission, plan as never);
+    expect(result.status).toBe("completed");
+
+    // The repair delegation's adapter call must have used the explicit quality repair model
+    const repairModels = capturedModels.filter((m) => m !== "__none__");
+    expect(repairModels.length).toBeGreaterThan(0);
+    expect(repairModels).toContain("opencode/mimo-v2.5-free");
+  });
+});
+
+// Regression: project identity must use connected instance placeName
+describe("regression: project identity via connected instance placeName", () => {
+  it("normalizes place names: coin-rush-arena.rbxlx matches Coin Rush Arena", async () => {
+    const { normalizePlaceName } = await import("../orchestrator.js");
+    expect(normalizePlaceName("coin-rush-arena.rbxlx")).toBe("coin rush arena");
+    expect(normalizePlaceName("Coin Rush Arena")).toBe("coin rush arena");
+    expect(normalizePlaceName("coin-rush-arena.rbxl")).toBe("coin rush arena");
+    expect(normalizePlaceName("coin_rush_arena")).toBe("coin rush arena");
+    expect(normalizePlaceName("Coin  Rush  Arena")).toBe("coin rush arena");
+  });
+
+  it("rejects a clearly foreign place name", async () => {
+    const { normalizePlaceName } = await import("../orchestrator.js");
+    expect(normalizePlaceName("ai-factory-coin-simulator.rbxlx")).not.toBe(
+      normalizePlaceName("Coin Rush Arena"),
+    );
+  });
+
+  it("missing placeName treated as unavailable (matched: true) not false mismatch", async () => {
+    // Bridge that returns no instances (no placeName available)
+    const noPlaceBridge = {
+      discover: async () => ({ pluginConnected: true, message: "connected" }),
+      callTool: async (tool: string) => {
+        if (tool === "get_connected_instances") {
+          return {
+            ok: true,
+            message: "connected instances read",
+            stdout: JSON.stringify({ instances: [] }),
+          };
+        }
+        if (tool === "capture_screenshot") {
+          return {
+            ok: true,
+            message: "screenshot captured",
+            stdout: JSON.stringify({ screenshotPath: "/tmp/shot.png" }),
+          };
+        }
+        return { ok: false, message: `unknown tool ${tool}` };
+      },
+    };
+
+    // Create a Rojo project with a name
+    const projDir = path.join(tmpDir, "proj-identity");
+    await fs.mkdir(projDir, { recursive: true });
+    await fs.writeFile(
+      path.join(projDir, "default.project.json"),
+      JSON.stringify({ name: "Coin Rush Arena" }),
+    );
+
+    const mission = createMission("Create a Roblox coin simulator");
+    const stateDir = path.join(tmpDir, "state-identity");
+    await fs.mkdir(stateDir, { recursive: true });
+    const state = new MissionState(stateDir, mission.id);
+    await state.init();
+    await state.setMission(mission);
+    const del = createDelegation(
+      mission.id,
+      "obj-1",
+      "Build",
+      "ROLE: developer\nBuild",
+      "engineering",
+      { stepIds: [], dependsOn: [], acceptanceCriteria: ["done"], role: "Developer", requiresReview: false },
+    );
+    const plan = {
+      id: "plan-id",
+      missionId: mission.id,
+      objectives: [{ id: "obj-1", title: "Build", description: "build", delegations: [del.id] }],
+      delegations: [del],
+      risks: [],
+      validationGates: [],
+      createdAt: new Date().toISOString(),
+    };
+    await state.setPlan(plan);
+    await state.addDelegation(del);
+
+    const orchestrator = new MissionOrchestrator({
+      maxRepairs: 1,
+      baseDir: tmpDir,
+      project: projDir,
+      factoryAdapter: passingAdapter,
+      auditor: passingAuditor,
+      eventSink: new InMemoryEventSink(),
+      missionState: state,
+      qualityStage: {
+        enabled: true,
+        maxRounds: 1,
+        repairBudget: 0,
+        bridge: noPlaceBridge as never,
+        functional: strongFunctional,
+        review: async () => passReview(),
+      },
+    });
+    const result = await orchestrator.executeMission(mission, plan as never);
+    // Should NOT fail due to identity mismatch — missing placeName = unavailable = matched
+    expect(result.status).toBe("completed");
+    const findings = state.getQualityFindings();
+    const identityFindings = findings.filter((f) => f.violatedRequirement === "project-identity-match");
+    expect(identityFindings).toHaveLength(0);
   });
 });

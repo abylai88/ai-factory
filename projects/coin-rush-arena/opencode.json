@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "small_model": "opencode/mimo-v2.5-free",
+  "disabled_providers": [
+    "openai",
+    "anthropic"
+  ],
+  "mcp": {
+    "robloxstudio": {
+      "type": "remote",
+      "url": "http://127.0.0.1:58741/mcp",
+      "oauth": false,
+      "headers": {
+        "X-MCP-Auth": "{file:~/.robloxstudio-mcp/auth-token}"
+      }
+    }
+  }
+}
